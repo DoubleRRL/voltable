@@ -1,0 +1,1318 @@
+import { getAppConfig } from "@/lib/env";
+import {
+  getCacheEntry,
+  getAllPageFigures,
+  getAssetsForChunkIds,
+  getFigureEvidenceForPages,
+  getVisualAssets,
+  saveCacheEntry,
+  searchChunksFts,
+  getStoredChunksByIds,
+} from "@/lib/rag/storage";
+import type {
+  ChatAnswer,
+  FigureEvidence,
+  SourceCitation,
+  StoredChunk,
+  StoredException,
+} from "@/lib/rag/types";
+import { retrieveChunks } from "@/lib/rag/retrieval";
+import {
+  askOllama,
+  streamOllama,
+  type ModelResult,
+  type OllamaUsage,
+} from "@/lib/rag/ollama";
+
+/**
+ * Shown when nothing in the ESR clears the retrieval threshold.
+ *
+ * It is deliberately informative rather than empty: the planner gets told what
+ * was searched and what the nearest material was, and keeps the judgement. A
+ * tool that answers "not covered" and hands back three candidate sections is
+ * more useful than one that either guesses or says nothing.
+ */
+/**
+ * Returned when nothing cleared the retrieval threshold.
+ *
+ * The UI already carries a "Not in the ESR" badge and the nearest sections in
+ * the evidence rail. The answer text therefore says only the part the prose has
+ * to carry: do not quote a number from this. Repeating the verdict across all
+ * three surfaces turns one finding into three warnings.
+ */
+const NOT_COVERED_ANSWER = "Check with your supervisor before answering this one.";
+
+/** Closest chunks for a question that returned nothing above threshold. */
+const getNearestChunks = (question: string, limit: number): StoredChunk[] =>
+  searchChunksFts(question, limit * 3)
+    .map((hit) => hit.chunkId)
+    .map((id) => getStoredChunksByIds([id])[0])
+    .filter((chunk): chunk is StoredChunk => Boolean(chunk))
+    .slice(0, limit);
+
+type RetrievalChunk = {
+  page: number;
+  text: string;
+  section: string | null;
+  chapter?: string | null;
+  score: number;
+  id: string;
+};
+
+type ParsedModelResponse = {
+  answer?: string;
+  directAnswer?: string;
+  citations?: Array<{ chunkIndex?: number; quote?: string; reason?: string; type?: string }>;
+  figures?: Array<{ chunkIndex?: number }>;
+};
+
+const MAX_PROMPT_CHUNKS = 4;
+const PROMPT_SNIPPET_LEN = 650;
+const MAX_ANSWER_PARAGRAPHS = 1;
+const MAX_ANSWER_WORDS = 88;
+const MAX_DIRECT_ANSWER_WORDS = 32;
+
+const sanitize = (value: string) => value.replace(/\s+/g, " ").trim();
+
+const buildRetrievalQuery = (question: string, conversationPrefix: string): string => {
+  const words = question.trim().split(/\s+/).filter(Boolean);
+  if (words.length >= 6 || !conversationPrefix.trim()) {
+    return question;
+  }
+  const userLines = [...conversationPrefix.matchAll(/^User:\s*(.+)$/gim)].map((m) =>
+    m[1].trim()
+  );
+  const tail = userLines.slice(-2).join(" ");
+  const merged = `${tail} ${question}`.trim();
+  return merged.slice(0, 1200);
+};
+
+const compactWords = (value: string, maxWords: number) => {
+  const normalized = sanitize(value);
+  if (!normalized) {
+    return "";
+  }
+
+  const words = normalized.split(" ");
+  if (words.length <= maxWords) {
+    return normalized;
+  }
+
+  return `${words.slice(0, maxWords).join(" ")}...`;
+};
+
+const hasQuestionDistanceIntent = (question: string) => {
+  const value = question.toLowerCase();
+  return /clearance|distance|inches|inch|feet|foot|\bft\b|'|′|how far|line side|load side|pad\s*-?mount|working space|in front|behind|rear|radial|sides?/.test(
+    value
+  );
+};
+
+const sentenceCandidates = (value: string) => {
+  const matches = value.match(/[^.!?]+[.!?]*/g) ?? [];
+  const sentences = matches.map((sentence) => sentence.trim()).filter(Boolean);
+  if (sentences.length === 0) {
+    return [sanitize(value)];
+  }
+  return sentences;
+};
+
+const quoteMeasurementMatch = (value: string) =>
+  value.match(/\d+(?:\.\d+)?(?:\s*(?:-|–|to)\s*\d+(?:\.\d+)?)?\s*(?:inches|inch|in\.)/i) ??
+  value.match(/\d+(?:\.\d+)?(?:\s*(?:-|–|to)\s*\d+(?:\.\d+)?)?\s*"/) ??
+  value.match(/\b\d+(?:\.\d+)?(?:\s*(?:-|–|to)\s*\d+(?:\.\d+)?)?\s*(?:ft|feet|foot)\b/i) ??
+  value.match(/\b\d+(?:\.\d+)?'/) ??
+  value.match(/\b\d+(?:\.\d+)?′/);
+
+const quoteHasMeasurement = (value: string) => Boolean(quoteMeasurementMatch(value));
+
+const detectClearanceFacetHints = (combined: string): Set<string> => {
+  const t = combined.toLowerCase();
+  const out = new Set<string>();
+  if (/pad\s*-?mount|pad mount|pad-mounted|transformer|equipment\s+pad/.test(t)) {
+    out.add("pad");
+  }
+  if (/in front of|front of|^\s*front |face of|working space|clear working space/.test(t)) {
+    out.add("front");
+  }
+  if (/\brear\b|behind|back of|\bradial\b/.test(t)) {
+    out.add("rear");
+  }
+  if (/each side|both sides|side clearance|laterally|sides?\s+of/.test(t)) {
+    out.add("side");
+  }
+  if (/line side/.test(t)) {
+    out.add("lineSide");
+  }
+  if (/load side/.test(t)) {
+    out.add("loadSide");
+  }
+  return out;
+};
+
+const facetAlignmentScore = (sentence: string, facets: Set<string>): number => {
+  if (facets.size === 0) {
+    return 0;
+  }
+  const s = sentence.toLowerCase();
+  let score = 0;
+  if (facets.has("front") && /front|working space|face of|in front/.test(s)) {
+    score += 4;
+  }
+  if (facets.has("rear") && /rear|behind|back of|radial/.test(s)) {
+    score += 4;
+  }
+  if (facets.has("side") && /side|lateral|each side|both sides/.test(s)) {
+    score += 3;
+  }
+  if (facets.has("lineSide") && /line side/.test(s)) {
+    score += 4;
+  }
+  if (facets.has("loadSide") && /load side/.test(s)) {
+    score += 4;
+  }
+  if (facets.has("pad") && /pad|transformer|padmount|pad-mounted/.test(s)) {
+    score += 2;
+  }
+  return score;
+};
+
+const bestCitationSentenceForFacets = (
+  citations: SourceCitation[],
+  question: string,
+  conversationPrefix: string
+): string | null => {
+  const combined = `${conversationPrefix}\n${question}`;
+  const facets = detectClearanceFacetHints(combined);
+  let best: { sentence: string; score: number; hasMeasure: boolean } | null = null;
+  for (const citation of citations) {
+    for (const sentence of sentenceCandidates(citation.quote)) {
+      const fScore = facetAlignmentScore(sentence, facets);
+      const hasMeasure = quoteHasMeasurement(sentence);
+      const rank = fScore * 20 + (hasMeasure ? 10 : 0);
+      if (
+        !best ||
+        rank > best.score ||
+        (rank === best.score && hasMeasure && !best.hasMeasure)
+      ) {
+        best = { sentence, score: rank, hasMeasure };
+      }
+    }
+  }
+  if (!best?.hasMeasure) {
+    return null;
+  }
+  if (facets.size > 0 && facetAlignmentScore(best.sentence, facets) === 0) {
+    return null;
+  }
+  return best.sentence;
+};
+
+const extractQuestionedDirectSentence = (value: string, question: string) => {
+  const normalized = sanitize(value);
+  const lowerQuestion = question.toLowerCase();
+  const questionTokens = [
+    "line side",
+    "load side",
+    "clearance",
+    "panel",
+    "meter",
+    "distance",
+    "inch",
+    "foot",
+    "feet",
+    "ft",
+    "padmount",
+    "pad mount",
+    "working space",
+    "front",
+    "rear",
+  ];
+  const hasToken = (sentence: string) =>
+    questionTokens.some((token) => sentence.toLowerCase().includes(token));
+
+  const sentences = sentenceCandidates(normalized);
+  const prioritized = sentences.find((sentence) => hasToken(sentence) && quoteHasMeasurement(sentence));
+  if (prioritized) {
+    return prioritized;
+  }
+
+  if (lowerQuestion.includes("line side")) {
+    const lineSide = sentences.find(
+      (sentence) => sentence.toLowerCase().includes("line side") && quoteHasMeasurement(sentence),
+    );
+    if (lineSide) {
+      return lineSide;
+    }
+  }
+
+  return sentences.find((sentence) => quoteHasMeasurement(sentence));
+};
+
+const extractMeasurementAroundKeyword = (value: string, keyword: string) => {
+  const match = value.match(new RegExp(`.{0,120}${keyword}.{0,120}`, "i"));
+  if (!match) {
+    return null;
+  }
+  const hit = quoteMeasurementMatch(match[0]);
+  return hit?.[0] ?? null;
+};
+
+const isModelDirectAnswerUseful = (value: string) => {
+  const normalized = sanitize(value).toLowerCase();
+  if (!normalized || normalized === "no direct answer.") {
+    return false;
+  }
+  if (normalized.startsWith("figure")) {
+    return false;
+  }
+  return true;
+};
+
+const deriveDirectAnswer = (
+  question: string,
+  modelDirectAnswer: string,
+  citations: SourceCitation[],
+  conversationPrefix = ""
+) => {
+  const compactModel = compactToSentences(modelDirectAnswer, 1, MAX_DIRECT_ANSWER_WORDS);
+  const combinedQ = `${conversationPrefix}\n${question}`;
+  if (!hasQuestionDistanceIntent(question) && !hasQuestionDistanceIntent(conversationPrefix)) {
+    return compactModel;
+  }
+
+  if (isModelDirectAnswerUseful(modelDirectAnswer) && quoteHasMeasurement(modelDirectAnswer)) {
+    const qFacets = detectClearanceFacetHints(combinedQ);
+    const modelSan = sanitize(modelDirectAnswer);
+    if (qFacets.size === 0 || facetAlignmentScore(modelSan, qFacets) > 0) {
+      return compactModel;
+    }
+  }
+
+  const oriented = bestCitationSentenceForFacets(citations, question, conversationPrefix);
+  if (oriented) {
+    return compactToSentences(oriented, 1, MAX_DIRECT_ANSWER_WORDS);
+  }
+
+  const lowerQuestion = question.toLowerCase();
+  if (lowerQuestion.includes("line side")) {
+    for (const citation of citations) {
+      const lineSideChunk = extractQuestionedDirectSentence(citation.quote, question);
+      const measurement = extractMeasurementAroundKeyword(citation.quote, "line side");
+      if (measurement) {
+        return compactToSentences(
+          `Line-side clearance reference: ${measurement} ${lineSideChunk ? "mentioned in ESR guidance." : ""}`,
+          1,
+          MAX_DIRECT_ANSWER_WORDS,
+        );
+      }
+    }
+
+    const fallbackLineSideMeasurement = citations.find((citation) =>
+      citation.quote.toLowerCase().includes("line side")
+    );
+    if (fallbackLineSideMeasurement) {
+      const measurement = extractMeasurementAroundKeyword(fallbackLineSideMeasurement.quote, "line side");
+      if (measurement) {
+        return compactToSentences(
+          `Line-side clearance appears to be at least ${measurement}.`,
+          1,
+          MAX_DIRECT_ANSWER_WORDS,
+        );
+      }
+    }
+
+    return compactToSentences(
+      "No clear line-side clearance figure was returned in top retrieval snippets.",
+      1,
+      MAX_DIRECT_ANSWER_WORDS,
+    );
+  }
+
+  for (const citation of citations) {
+    const sentence = extractQuestionedDirectSentence(citation.quote, question);
+    if (sentence && quoteHasMeasurement(sentence)) {
+      return compactToSentences(sentence, 1, MAX_DIRECT_ANSWER_WORDS);
+    }
+  }
+
+  return compactModel;
+};
+
+const compactToSentences = (value: string, maxSentences: number, maxWords: number) => {
+  const normalized = sanitize(value);
+  if (!normalized) {
+    return "";
+  }
+
+  // Split only on terminal punctuation followed by whitespace, so a decimal
+  // value ("12.5 mG", "0.600 V") is not truncated at the point.
+  const sentences =
+    normalized
+      .split(/(?<=[.!?])\s+(?=[A-Z0-9"'(])/)
+      .map((sentence) => sentence.trim())
+      .filter(Boolean) ?? [];
+  const compact = sentences.length > 0 ? sentences.slice(0, maxSentences).join(" ") : normalized;
+  return compactWords(compact, maxWords);
+};
+
+/**
+ * Resolve a candidate quote to a real span of the source chunk.
+ *
+ * Matching is whitespace-insensitive: `sanitize` collapses the quote's
+ * newlines but the source keeps them, so a raw `indexOf` fails for every
+ * multi-line chunk (most of them) and produced zero citations for correct
+ * answers. We walk both strings, skipping whitespace runs in the source, and
+ * record where the needle actually landed so the UI can highlight the true
+ * span.
+ *
+ * Returns null when the quote is not substantially present. An unverifiable
+ * citation is worse than none: it looks like evidence.
+ */
+const resolveQuote = (
+  source: string,
+  quote: string
+): { text: string; start: number; end: number } | null => {
+  const needle = sanitize(quote).toLowerCase();
+  if (needle.length < 8) {
+    return null;
+  }
+
+  const hay = source.toLowerCase();
+  let si = 0;
+  let first = -1;
+  let last = -1;
+  let matched = 0;
+  for (let i = 0; i < needle.length; i += 1) {
+    const target = needle[i];
+    while (si < hay.length && hay[si] !== target && /\s/.test(hay[si]!)) si += 1;
+    if (si >= hay.length) break;
+    if (hay[si] === target) {
+      if (first < 0) first = si;
+      last = si;
+      matched += 1;
+      si += 1;
+    } else if (!/\s/.test(target)) {
+      break;
+    }
+  }
+  if (matched < Math.min(needle.length, Math.max(6, Math.floor(needle.length * 0.7))) || first < 0) {
+    return null;
+  }
+  return { text: source.slice(first, last + 1).trim(), start: first, end: last + 1 };
+};
+
+/**
+ * Choose the span of a chunk to cite.
+ *
+ * The model's own quote is unreliable for this corpus: measured on the ESR it
+ * paraphrased or invented the span it claimed to be quoting (answering "30.5"
+ * and citing that invented sentence), so validation rejected it and the answer
+ * shipped with zero citations. The citation must therefore be derived from the
+ * chunk, not trusted from the model.
+ *
+ * Order:
+ *  1. a line containing a measurement, when the question asks about a value
+ *  2. the model's quote, if it resolves
+ *  3. the chunk's first substantial sentence
+ */
+const MEASUREMENT_LINE =
+  /\d+(?:\.\d+)?\s*(?:percent|%|ft|feet|foot|in\b|inches|inch|v\b|volt|volts|a\b|amp|amps|amperes|mg\b|kv\b|kva\b|ohm|ohms|hz|days?|months?|years?|hours?)/i;
+
+/** A line that pairs a number with a unit, i.e. one that could answer "how much". */
+const hasValue = (line: string) => MEASUREMENT_LINE.test(line);
+
+/**
+ * Choose the span of a chunk to cite.
+ *
+ * The model's own quote is unreliable for this corpus: measured on the ESR it
+ * paraphrased or invented the span it claimed to be quoting (answering "30.5"
+ * and citing that invented sentence), so validation rejected it and the answer
+ * shipped with zero citations. The citation must therefore be derived from the
+ * chunk, not trusted from the model.
+ *
+ * Order:
+ *  1. a line that actually carries a value (number + unit). OCR of a diagram
+ *     puts the label on one line and the value on the next ("Moving meter panel
+ *     3 feet will reduce EMF" / "approximately 87 percent"), so a line whose
+ *     only number is part of the label prose is skipped in favour of one whose
+ *     number is the answer.
+ *  2. the line that best overlaps the question's distinctive words
+ *  3. the chunk's first substantial line
+ */
+const pickCitationSpan = (chunkText: string, question: string): string => {
+  const lines = chunkText
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter((line) => line.length >= 12);
+
+  if (lines.length === 0) {
+    return chunkText;
+  }
+
+  // Prefer a line that reads like an answer: number immediately followed by a
+  // unit, optionally preceded by a comparative phrase.
+  const valueLines = lines.filter(hasValue);
+  const questionWords = new Set(
+    question
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((w) => w.length >= 4)
+  );
+  const overlapOf = (line: string) => {
+    const words = line.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 4);
+    return words.filter((w) => questionWords.has(w)).length;
+  };
+
+  const wantsMeasurement = /\d/.test(question) || /how (?:much|many|long|far|tall|wide)/i.test(question);
+  const pool = wantsMeasurement && valueLines.length > 0 ? valueLines : lines;
+
+  // Unit-aware tie-break. The ESR writes "MAX B = 96 mG" while the question
+  // says "maximum magnetic field reading in milligauss", so a plain word
+  // overlap scores that line at zero and picks the caption instead. If the
+  // question names a unit, prefer the line that actually carries it.
+  const unitNeedles = (
+    question.match(
+      /\b(?:milligauss?|gauss|percent|feet|ft|inches|inch|volts?|amps?|amperes|kva|kw|ohms?|hz|days?|months?|years?|hours?)\b/gi
+    ) ?? []
+  ).map((u) => u.toLowerCase());
+
+  const symbolEquivalent = (line: string): boolean => {
+    const low = line.toLowerCase();
+    return (
+      (/\bmg\b|gauss/.test(low) && unitNeedles.some((u) => /mg|gauss/.test(u))) ||
+      (/\b(?:ft|feet|foot)\b/.test(low) && unitNeedles.some((u) => /ft|feet|foot/.test(u))) ||
+      (/\b(?:in|inch|inches)\b/.test(low) && unitNeedles.some((u) => /^in/.test(u))) ||
+      (/\b(?:percent|%)\b/.test(low) && unitNeedles.some((u) => /percent/.test(u)))
+    );
+  };
+
+  const best = [...pool]
+    .map((line) => ({ line, unit: symbolEquivalent(line) ? 1 : 0, overlap: overlapOf(line) }))
+    .sort((a, b) => b.unit - a.unit || b.overlap - a.overlap)[0];
+
+  const chosen = best && (best.unit > 0 || best.overlap > 0) ? best.line : pool[0];
+  if (!chosen) {
+    return chunkText;
+  }
+
+  // Prefix the section heading so the citation carries its context, which is
+  // what a planner needs to judge whether it applies to their case.
+  const heading = lines[0];
+  if (heading && heading !== chosen && !chosen.includes(heading) && chosen.length >= 12) {
+    return `${heading} — ${chosen}`;
+  }
+  return chosen;
+};
+
+/**
+ * Build a citation that a reader can check.
+ *
+ * The quoted span is extracted from the chunk and then verified to occur in it,
+ * so every served citation resolves to a real character span. Model-supplied
+ * quotes are used only when they verify; an unverifiable one is dropped.
+ */
+const buildCitation = (
+  quote: string | undefined | null,
+  chunk: { page: number; text: string; section?: string | null; chapter?: string | null },
+  question?: string
+): SourceCitation | null => {
+  const source = chunk.text ?? "";
+  if (!source) {
+    return null;
+  }
+
+  const fromQuestion = question ? pickCitationSpan(source, question) : null;
+  const resolved =
+    (fromQuestion ? resolveQuote(source, fromQuestion) : null) ??
+    resolveQuote(source, quote ?? "") ??
+    resolveQuote(source, source);
+  if (!resolved) {
+    return null;
+  }
+  return {
+    page: chunk.page,
+    quote: sanitize(resolved.text),
+    section: chunk.section ?? null,
+    chapter: chunk.chapter ?? null,
+    pageLabel: String(chunk.page),
+    sourceLink: `${getAppConfig().ESR_SOURCE_LINK_PREFIX}${chunk.page}`,
+    quoteStart: resolved.start,
+    quoteEnd: resolved.end,
+  };
+};
+
+const withTimeout = <T>(promise: Promise<T>, timeoutMs: number): Promise<T> => {
+  const timeout = new Promise<never>((_, reject) => {
+    setTimeout(() => reject(new Error("LLM request timeout")), timeoutMs);
+  });
+  return Promise.race([promise, timeout]) as Promise<T>;
+};
+
+const retryAsync = async <T>(fn: () => Promise<T>, attempts = 2): Promise<T> => {
+  try {
+    return await fn();
+  } catch (error) {
+    if (attempts <= 0) {
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    return retryAsync(fn, attempts - 1);
+  }
+};
+
+const mergeFigureLists = (primary: FigureEvidence[], extra: FigureEvidence[]) => {
+  const seen = new Set(primary.map((f) => f.id));
+  const out = [...primary];
+  for (const fig of extra) {
+    if (!seen.has(fig.id)) {
+      out.push(fig);
+      seen.add(fig.id);
+    }
+  }
+  return out;
+};
+
+const ensurePagePreviewFigures = (
+  figures: FigureEvidence[],
+  pages: number[],
+  sourceLinkPrefix: string
+): FigureEvidence[] => {
+  const covered = new Set(figures.map((f) => f.page));
+  const seenIds = new Set(figures.map((f) => f.id));
+  const out = [...figures];
+  for (const page of pages) {
+    if (!Number.isFinite(page) || covered.has(page)) {
+      continue;
+    }
+    const id = `page-preview-${page}`;
+    if (seenIds.has(id)) {
+      continue;
+    }
+    covered.add(page);
+    seenIds.add(id);
+    out.push({
+      id,
+      page,
+      caption: `Page ${page} (preview)`,
+      sourceLink: `${sourceLinkPrefix}${page}`,
+      chapter: null,
+      figureUrl: `/figures/page-${page}.png`,
+      ocrText: null,
+    });
+  }
+  return out;
+};
+
+const finalizeFigures = (figures: FigureEvidence[], quoteSet: RetrievalChunk[]): FigureEvidence[] => {
+  const pages = [...new Set(quoteSet.map((c) => c.page))];
+  return ensurePagePreviewFigures(figures, pages, getAppConfig().ESR_SOURCE_LINK_PREFIX);
+};
+
+const fallbackFigureEvidence = (quoteSet: RetrievalChunk[], pageFigures: FigureEvidence[]) => {
+  const byPage = new Map<number, FigureEvidence>();
+  for (const figure of pageFigures) {
+    if (!byPage.has(figure.page)) {
+      byPage.set(figure.page, figure);
+    }
+  }
+
+  const selected: FigureEvidence[] = [];
+  for (const chunk of quoteSet) {
+    const match = byPage.get(chunk.page);
+    if (match) {
+      selected.push(match);
+      break;
+    }
+  }
+  return selected;
+};
+
+const EXCEPTION_CUE =
+  /\b(except(?:ion)?s?|shall not|must not|prohibited|provided that|unless|note[:\s])/i;
+
+const dedupeExceptions = (items: StoredException[]): StoredException[] => {
+  const seen = new Set<string>();
+  const out: StoredException[] = [];
+  for (const item of items) {
+    const text = sanitize(item.text);
+    if (!text) {
+      continue;
+    }
+    const key = text.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    out.push({
+      text,
+      ...(typeof item.page === "number" ? { page: item.page } : {}),
+      ...(item.sourceLink ? { sourceLink: item.sourceLink } : {}),
+    });
+  }
+  return out;
+};
+
+/** Temporary bridge when visual_assets has no exceptions yet — citation quote heuristics only. */
+const heuristicExceptionsFromCitations = (citations: SourceCitation[]): StoredException[] => {
+  const out: StoredException[] = [];
+  for (const citation of citations) {
+    for (const sentence of sentenceCandidates(citation.quote)) {
+      if (EXCEPTION_CUE.test(sentence)) {
+        out.push({
+          text: sentence,
+          page: citation.page,
+          sourceLink: citation.sourceLink,
+        });
+      }
+    }
+  }
+  return dedupeExceptions(out).slice(0, 6);
+};
+
+const collectStoredExceptions = (
+  chunkIds: string[],
+  citations: SourceCitation[]
+): StoredException[] => {
+  let assets: ReturnType<typeof getAssetsForChunkIds> = [];
+  try {
+    assets = getAssetsForChunkIds(chunkIds);
+    if (assets.length === 0) {
+      // Broader fallback: any assets on citation pages (pre-re-ingest empty registry).
+      const pages = new Set(citations.map((c) => c.page));
+      assets = getVisualAssets().filter((a) => pages.has(a.page));
+    }
+  } catch {
+    assets = [];
+  }
+
+  const fromAssets = dedupeExceptions(
+    assets.flatMap((asset) =>
+      (asset.exceptions ?? []).map((ex) => ({
+        text: ex.text,
+        page: ex.page ?? asset.page,
+        sourceLink: ex.sourceLink ?? asset.sourceLink,
+      }))
+    )
+  );
+
+  if (fromAssets.length > 0 || assets.length > 0) {
+    // Prefer store path even when empty — do not invent via heuristic when registry exists.
+    return fromAssets;
+  }
+
+  return heuristicExceptionsFromCitations(citations);
+};
+
+const fallbackAnswer = (
+  question: string,
+  citations: SourceCitation[],
+  text: string[],
+  allFigures: FigureEvidence[],
+  quoteSet: RetrievalChunk[],
+  exceptions: StoredException[] = []
+): ChatAnswer => {
+  const base = text.find(Boolean) ?? "";
+  const lower = question.toLowerCase();
+  let directMatch: string | null = null;
+  if (/inch|in\./.test(lower)) {
+    directMatch = base.match(/\b\d+(?:\.\d+)?\s*(?:inches|inch|in\.)\b/i)?.[0] ?? null;
+  }
+  if (!directMatch && /foot|feet|\bft\b|'|′/.test(lower)) {
+    directMatch =
+      base.match(/\b\d+(?:\.\d+)?(?:\s*(?:ft|feet|foot)|')\b/i)?.[0] ??
+      base.match(/\b\d+(?:\.\d+)?′/)?.[0] ??
+      null;
+  }
+  if (!directMatch) {
+    directMatch = quoteMeasurementMatch(base)?.[0] ?? null;
+  }
+
+  const answer = citations.length > 0 ? base : "I did not find a confident answer in the indexed ESR data.";
+
+  return {
+    answer: compactToSentences(answer, MAX_ANSWER_PARAGRAPHS, MAX_ANSWER_WORDS),
+    // No summary when nothing was found: the notice below the card already says
+    // it, and repeating it as a headline makes one finding look like two.
+    directAnswer: citations.length === 0 ? "" : compactWords(directMatch ?? (citations[0]?.quote ?? "No exact value extracted."), MAX_DIRECT_ANSWER_WORDS),
+    citations,
+    figures: fallbackFigureEvidence(quoteSet, allFigures),
+    exceptions,
+    grounding: citations.length > 0 ? "esr" : "none",
+    notCovered: citations.length === 0,
+    retrievalSummary: {
+      totalCandidates: text.length,
+      matchedChunks: text.length,
+      confidence: 0.65,
+      coverage: 0.65,
+      notCovered: citations.length === 0,
+      intent: "none",
+      chapters: [...new Set(quoteSet.map((c) => c.chapter).filter(Boolean))] as string[],
+      latencyMs: 0,
+    },
+  };
+};
+
+const answerPrompt = (
+  question: string,
+  chunks: RetrievalChunk[],
+  conversationPrefix = "",
+  storedExceptions: StoredException[] = []
+) => {
+  const context = chunks
+    .map((chunk, index) => {
+      const snippet = sanitize(chunk.text).slice(0, PROMPT_SNIPPET_LEN);
+      return `[${index}] page=${chunk.page} section=${chunk.section ?? ""} evidence=${snippet}`;
+    })
+    .join("\n");
+
+  const prior = conversationPrefix.trim()
+    ? `Prior conversation (for follow-up context only; facts must still come from ESR chunks below):\n${conversationPrefix.trim()}\n\n`
+    : "";
+
+  const exceptionBlock =
+    storedExceptions.length > 0
+      ? `Stored exceptions (from the ESR index — do not contradict; do not invent additional exceptions):\n${storedExceptions
+          .map((ex, i) => `- [${i}] ${sanitize(ex.text).slice(0, 240)}`)
+          .join("\n")}\n\n`
+      : "";
+
+  return `
+You are a strict retrieval-grounded assistant. Use only the provided ESR chunks.
+Write in short, direct language for construction professionals (STE-inspired: active voice, short sentences, one idea per sentence; keep ESR technical nouns consistent).
+${prior}${exceptionBlock}Question: ${question}
+
+Context chunks:
+${context}
+
+Return valid JSON exactly in this structure:
+{
+  "answer": "concise answer for user",
+  "directAnswer": "single-sentence key answer (often one value/unit when applicable)",
+  "citations": [
+    {"chunkIndex": number, "quote": "exact words copied from that chunk", "reason": "why this chunk supports answer", "type": "text|figure|table|caption"}
+  ],
+  "figures": [
+    {"chunkIndex": number}
+  ]
+}
+
+Rules:
+- Cite at least one chunk.
+- Every citation MUST include "quote": copy the exact words from that chunk that support the answer. Character-for-character, including units. A quote is checked against the chunk and dropped if it does not appear, so a paraphrase loses you the citation.
+- Limit each citation list to the most relevant chunks only.
+- Use only language supported by the ESR chunks.
+- Do not add unknown values.
+- Do not invent or list exceptions in the JSON. Exceptions are attached separately from storage.
+- When the question mentions orientation or location (front, rear, side, line side, load side, working space, radial, "in front of"), the answer and directAnswer MUST reflect that same orientation. Do not substitute a clearance that applies to a different face (e.g. rear/radial vs front/working space) unless the chunks only address one.
+- Keep answer concise: exactly one short paragraph in answer; one-sentence directAnswer (roughly <= 36 words when needed for units like feet and inches).
+- If confidence is weak return a brief caveat inside answer.
+`;
+};
+
+const buildFigureEvidence = (
+  quoteSet: RetrievalChunk[],
+  figureResponses: Array<{ chunkIndex?: number }> | undefined,
+  pageFigures: FigureEvidence[]
+) => {
+  const byPage = new Map<number, FigureEvidence>();
+  for (const figure of pageFigures) {
+    if (!byPage.has(figure.page)) {
+      byPage.set(figure.page, figure);
+    }
+  }
+
+  const seen = new Set<string>();
+  const selected = [] as FigureEvidence[];
+
+  const requested = figureResponses ?? [];
+  for (const figure of requested) {
+    const chunkIndex = figure.chunkIndex;
+    if (typeof chunkIndex !== "number" || chunkIndex < 0) {
+      continue;
+    }
+    const page = quoteSet[chunkIndex]?.page;
+    if (!page) {
+      continue;
+    }
+    const match = byPage.get(page);
+    if (!match) {
+      continue;
+    }
+    if (!seen.has(match.id)) {
+      selected.push(match);
+      seen.add(match.id);
+    }
+  }
+
+  if (selected.length > 0) {
+    return selected;
+  }
+
+  for (const chunk of quoteSet) {
+    const match = byPage.get(chunk.page);
+    if (match && !seen.has(match.id)) {
+      selected.push(match);
+      seen.add(match.id);
+      if (selected.length >= 2) {
+        break;
+      }
+    }
+  }
+
+  return selected;
+};
+
+const answerByModel = async (prompt: string): Promise<ModelResult> => {
+  return retryAsync(() => withTimeout(askOllama(prompt), getAppConfig().REQUEST_TIMEOUT_MS));
+};
+
+/**
+ * The model call that a stream rides on.
+ *
+ * No total-duration budget, only the per-chunk idle budget inside `streamOllama`:
+ * a whole-answer deadline would cut off the very stream being asked for. The
+ * retry is deliberately narrower than `retryAsync`'s — one attempt only while
+ * nothing has been emitted, because a retry after prose has been handed to the
+ * client would repeat it in the transcript.
+ */
+const streamAnswerByModel = async (
+  prompt: string,
+  signal: AbortSignal | undefined,
+  onAnswerText: (delta: string) => Promise<void>
+): Promise<ModelResult> => {
+  let emitted = false;
+  const run = () =>
+    streamOllama(prompt, {
+      signal,
+      onAnswerText: async (delta) => {
+        emitted = true;
+        await onAnswerText(delta);
+      },
+    });
+
+  try {
+    return await run();
+  } catch (error) {
+    if (emitted || signal?.aborted) {
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    return run();
+  }
+};
+
+/** What retrieval found, as the answer was assembled from it. */
+export type RetrievedProgress = {
+  /** Sections retrieval returned; these are the ones the answer reads. */
+  totalCandidates: number;
+  /** Passages lexical retrieval matched, the pool `totalCandidates` came from. */
+  matchedChunks: number;
+  confidence: number;
+  chapters: string[];
+  /** Pages read, ascending and de-duplicated. */
+  pages: number[];
+  /** Diagrams the finished answer will carry. Counted, not predicted. */
+  figureCount: number;
+};
+
+export type AnswerProgressEvent =
+  /** The answer came out of the query cache; no retrieval, no model. */
+  | { kind: "cached"; retrieved: RetrievedProgress }
+  | { kind: "retrieved"; retrieved: RetrievedProgress }
+  /** Text is about to start. `model` is the only source still being generated. */
+  | { kind: "write"; source: "model" | "cache" | "extractive" | "fallback" | "near-miss" }
+  /** Prose decoded from the model's `answer` value, as it was produced. */
+  | { kind: "text"; delta: string };
+
+export type AnswerSink = {
+  onEvent: (event: AnswerProgressEvent) => void | Promise<void>;
+};
+
+export type AnswerOutcome = {
+  answer: ChatAnswer;
+  /** Counts the model server reported, or null when it reported none. */
+  usage: OllamaUsage | null;
+};
+
+export type AnswerQuestionOptions = {
+  visualFirst?: boolean;
+  conversationPrefix?: string;
+  /** Aborts a stream in flight when the caller goes away. */
+  signal?: AbortSignal;
+};
+
+type AnswerCoreOptions = AnswerQuestionOptions & {
+  /** Present to stream; absent for the one-shot path. */
+  sink?: AnswerSink;
+};
+
+/**
+ * Diagrams the finished answer will carry, counted from storage before any
+ * generation runs.
+ *
+ * `finalizeFigures` guarantees one figure per cited page, so with the default
+ * visual handling the count is exactly the number of pages read. Visual-first
+ * additionally merges every figure and table row on those pages, which is why
+ * that case counts rows.
+ */
+const countDiagrams = (
+  pages: number[],
+  allFigures: FigureEvidence[],
+  visualFirst: boolean
+): number => {
+  if (!visualFirst) {
+    return pages.length;
+  }
+  const pageSet = new Set(pages);
+  const rowsByPage = new Map<number, number>();
+  for (const figure of allFigures) {
+    if (!pageSet.has(figure.page)) {
+      continue;
+    }
+    rowsByPage.set(figure.page, (rowsByPage.get(figure.page) ?? 0) + 1);
+  }
+  return pages.reduce((total, page) => total + Math.max(rowsByPage.get(page) ?? 0, 1), 0);
+};
+
+const retrievedProgress = (
+  totalCandidates: number,
+  facts: { matchedChunks: number; confidence: number },
+  chapters: string[],
+  pages: number[],
+  allFigures: FigureEvidence[],
+  visualFirst: boolean
+): RetrievedProgress => ({
+  totalCandidates,
+  matchedChunks: facts.matchedChunks,
+  confidence: facts.confidence,
+  chapters,
+  pages,
+  figureCount: countDiagrams(pages, allFigures, visualFirst),
+});
+
+/** The one summary shape every answer reports, whatever produced the prose. */
+const retrievalSummaryFor = (
+  candidates: number,
+  summary: Awaited<ReturnType<typeof retrieveChunks>>["summary"],
+  chapters: string[],
+  retrievalLatencyMs: number
+): ChatAnswer["retrievalSummary"] => ({
+  totalCandidates: candidates,
+  matchedChunks: summary.matchedChunks,
+  confidence: summary.confidence,
+  coverage: summary.coverage,
+  notCovered: summary.notCovered,
+  intent: summary.intent.trigger,
+  chapters,
+  latencyMs: retrievalLatencyMs,
+});
+
+const answerCore = async (
+  question: string,
+  options: AnswerCoreOptions = {}
+): Promise<AnswerOutcome> => {
+  const { visualFirst = false, conversationPrefix = "" } = options;
+  const { sink } = options;
+  const config = getAppConfig();
+  const requestStart = Date.now();
+  const extractive = config.EXTRACTIVE_ANSWER;
+  const emit = async (event: AnswerProgressEvent) => {
+    await sink?.onEvent(event);
+  };
+  const cached = getCacheEntry(
+    question,
+    visualFirst,
+    conversationPrefix,
+    extractive
+  ) as ChatAnswer | null;
+  if (cached) {
+    // Retrieval did not run, so its latency did not either.
+    cached.retrievalSummary.latencyMs = 0;
+    await emit({
+      kind: "cached",
+      retrieved: {
+        totalCandidates: cached.retrievalSummary.totalCandidates,
+        matchedChunks: cached.retrievalSummary.matchedChunks,
+        confidence: cached.retrievalSummary.confidence,
+        chapters: cached.retrievalSummary.chapters,
+        pages: [...new Set(cached.citations.map((citation) => citation.page))].sort(
+          (a, b) => a - b
+        ),
+        figureCount: cached.figures.length,
+      },
+    });
+    // One event, not a token stream: the prose already exists whole.
+    await emit({ kind: "text", delta: cached.answer });
+    return { answer: cached, usage: null };
+  }
+
+  const retrievalQuery = buildRetrievalQuery(question, conversationPrefix);
+  const { candidates, summary } = await retrieveChunks(retrievalQuery, {
+    visualFirst,
+  });
+  // Retrieval is over. Everything after this is generation, and must not be
+  // billed to `retrievalSummary.latencyMs`.
+  const retrievalLatencyMs = Date.now() - requestStart;
+  const emitRetrieved = async (retrieved: RetrievedProgress) => {
+    await emit({ kind: "retrieved", retrieved });
+  };
+
+  if (candidates.length === 0) {
+    // Nothing cleared the threshold. The verdict is stated exactly once, by the
+    // not-covered notice under the card; the badge says it in one word and the
+    // answer prose says what to do about it. Repeating it here as well made one
+    // finding look like three separate problems.
+    const nearMisses = getNearestChunks(retrievalQuery, 3);
+    const chapters = [...new Set(nearMisses.map((c) => c.chapter).filter(Boolean))] as string[];
+    const empty: ChatAnswer = {
+      answer: NOT_COVERED_ANSWER,
+      directAnswer: "",
+      citations: nearMisses
+        .map((chunk) => buildCitation(null, chunk, question))
+        .filter((c): c is SourceCitation => c !== null),
+      figures: [],
+      exceptions: [],
+      grounding: "none",
+      notCovered: true,
+      retrievalSummary: {
+        totalCandidates: 0,
+        matchedChunks: summary.matchedChunks,
+        confidence: summary.confidence,
+        coverage: summary.coverage,
+        notCovered: true,
+        intent: summary.intent.trigger,
+        chapters,
+        latencyMs: retrievalLatencyMs,
+      },
+    };
+    // Nothing was read, so nothing was found: the near misses are handed back
+    // as citations, not as an answer, and no page or diagram count applies.
+    await emitRetrieved(retrievedProgress(0, summary, chapters, [], [], false));
+    await emit({ kind: "write", source: "near-miss" });
+    await emit({ kind: "text", delta: empty.answer });
+    return { answer: empty, usage: null };
+  }
+
+  const chapters = [
+    ...new Set(candidates.map((c) => c.chunk.chapter).filter((v): v is string => Boolean(v))),
+  ];
+  const quoteSet = candidates.map((result) => ({
+    page: result.chunk.page,
+    text: result.chunk.text,
+    section: result.chunk.section ?? null,
+    chapter: result.chunk.chapter ?? null,
+    score: result.confidence,
+    id: result.chunk.id,
+  }));
+  const pages = [...new Set(quoteSet.map((chunk) => chunk.page))].sort((a, b) => a - b);
+
+  const allFigures = getAllPageFigures();
+  const retrieved = retrievedProgress(
+    candidates.length,
+    summary,
+    chapters,
+    pages,
+    allFigures,
+    visualFirst
+  );
+
+  const buildFallback = () => {
+    const citations = quoteSet
+      .slice(0, 4)
+      .map((chunk) => buildCitation(null, chunk, question))
+      .filter((c): c is SourceCitation => c !== null);
+    const exceptions = collectStoredExceptions(
+      quoteSet.map((c) => c.id),
+      citations
+    );
+    return fallbackAnswer(
+      question,
+      citations,
+      quoteSet.map((chunk) => chunk.text),
+      allFigures,
+      quoteSet,
+      exceptions
+    );
+  };
+
+  /** The extractive answer, complete with its figures and summary. */
+  const finalizeFallback = () => {
+    const fallback = buildFallback();
+    if (visualFirst && quoteSet.length > 0) {
+      const fallbackPages = [...new Set(quoteSet.map((c) => c.page))];
+      fallback.figures = mergeFigureLists(
+        fallback.figures,
+        getFigureEvidenceForPages(fallbackPages)
+      );
+    }
+    fallback.figures = finalizeFigures(fallback.figures, quoteSet);
+    fallback.retrievalSummary = retrievalSummaryFor(
+      candidates.length,
+      summary,
+      chapters,
+      retrievalLatencyMs
+    );
+    return fallback;
+  };
+
+  await emitRetrieved(retrieved);
+
+  if (extractive) {
+    const fallback = finalizeFallback();
+    saveCacheEntry(
+      question,
+      fallback,
+      config.EMBEDDING_CACHE_TTL_SECONDS,
+      visualFirst,
+      conversationPrefix,
+      extractive
+    );
+    await emit({ kind: "write", source: "extractive" });
+    await emit({ kind: "text", delta: fallback.answer });
+    return { answer: fallback, usage: null };
+  }
+
+  const provisionalCitations = quoteSet
+    .slice(0, 4)
+    .map((chunk) => buildCitation(null, chunk, question))
+    .filter((c): c is SourceCitation => c !== null);
+  const storedExceptions = collectStoredExceptions(
+    quoteSet.map((c) => c.id),
+    provisionalCitations
+  );
+
+  const prompt = answerPrompt(
+    question,
+    quoteSet.slice(0, MAX_PROMPT_CHUNKS),
+    conversationPrefix,
+    storedExceptions
+  );
+
+  let parsed: ParsedModelResponse;
+  let usage: OllamaUsage | null = null;
+  let streamedText = false;
+  try {
+    if (sink) {
+      await emit({ kind: "write", source: "model" });
+      const streamed = await streamAnswerByModel(prompt, options.signal, async (delta) => {
+        streamedText = true;
+        await emit({ kind: "text", delta });
+      });
+      parsed = streamed.response;
+      usage = streamed.usage;
+    } else {
+      const answered = await answerByModel(prompt);
+      parsed = answered.response;
+      usage = answered.usage;
+    }
+  } catch (error) {
+    // Prose already on the wire cannot be taken back, so a failure past the
+    // first token is the caller's to report, not something to paper over by
+    // silently swapping in a different answer.
+    if (streamedText || options.signal?.aborted) {
+      throw error;
+    }
+    const fallback = finalizeFallback();
+    if (sink) {
+      await emit({ kind: "write", source: "fallback" });
+      await emit({ kind: "text", delta: fallback.answer });
+    }
+    return { answer: fallback, usage: null };
+  }
+
+  const rawCitations = parsed.citations ?? [];
+  const citations =
+    rawCitations.length > 0
+      ? rawCitations
+          .map((citation) => {
+            const index = citation.chunkIndex;
+            if (typeof index !== "number" || index < 0 || index >= quoteSet.length) {
+              return null;
+            }
+            const chunk = quoteSet[index];
+            // Prefer the model's own quote; fall back to its directAnswer,
+            // then to the chunk's opening sentence. Each is verified against
+            // the chunk, so an unresolvable citation is dropped, not served.
+            return buildCitation(citation.quote, chunk, question);
+          })
+          .filter((entry): entry is SourceCitation => entry !== null)
+      : quoteSet
+          .slice(0, 2)
+          .map((chunk) => buildCitation(null, chunk, question))
+          .filter((entry): entry is SourceCitation => entry !== null);
+
+  const exceptions = collectStoredExceptions(
+    quoteSet.map((c) => c.id),
+    citations
+  );
+
+  const figures = buildFigureEvidence(quoteSet, parsed.figures, allFigures);
+  const rawAnswer = (parsed.answer || citations[0]?.quote || "No answer generated.")
+    .replace(/\s+/g, " ")
+    .split(/\n{2,}/)
+    .slice(0, MAX_ANSWER_PARAGRAPHS)
+    .join("\n\n");
+  const rawDirectAnswer = parsed.directAnswer || citations[0]?.quote || "No direct answer.";
+  const answer = compactToSentences(rawAnswer, 1, MAX_ANSWER_WORDS);
+  const directAnswer = deriveDirectAnswer(question, rawDirectAnswer, citations, conversationPrefix);
+
+  let figuresOut = figures;
+  if (visualFirst && quoteSet.length > 0) {
+    figuresOut = mergeFigureLists(figuresOut, getFigureEvidenceForPages(pages));
+  }
+  figuresOut = finalizeFigures(figuresOut, quoteSet);
+
+  const response: ChatAnswer = {
+    answer,
+    directAnswer,
+    citations,
+    figures: figuresOut,
+    exceptions,
+    grounding: citations.length === 0 ? "none" : citations.length >= 2 ? "esr" : "partial",
+    notCovered: citations.length === 0,
+    retrievalSummary: retrievalSummaryFor(
+      candidates.length,
+      summary,
+      chapters,
+      retrievalLatencyMs
+    ),
+  };
+
+  saveCacheEntry(
+    question,
+    response,
+    config.EMBEDDING_CACHE_TTL_SECONDS,
+    visualFirst,
+    conversationPrefix,
+    extractive
+  );
+
+  return { answer: response, usage };
+};
+
+/** One-shot answer. Callers that want prose as it is produced give `sink`. */
+export const answerQuestion = async (
+  question: string,
+  options: AnswerQuestionOptions = {}
+): Promise<ChatAnswer> => {
+  const { answer } = await answerCore(question, options);
+  return answer;
+};
+
+/**
+ * Answers a question and reports progress as it happens.
+ *
+ * With a `sink`, `text` events are the model's own output decoded from its JSON
+ * stream, in the order it was produced — nothing is assembled before the first
+ * one. The finished `ChatAnswer` still comes back whole, because citations and
+ * figures cannot be known until generation ends. Without a sink this is the
+ * one-shot path, and `usage` still carries the counts the model reported.
+ */
+export const answerQuestionOutcome = (
+  question: string,
+  options: AnswerQuestionOptions & { sink?: AnswerSink } = {}
+): Promise<AnswerOutcome> => {
+  return answerCore(question, options);
+};
+

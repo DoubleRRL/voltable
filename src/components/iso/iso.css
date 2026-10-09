@@ -1,0 +1,49 @@
+/* Shared isokit restyle for the empty-state equipment figures.
+   The --ik-* properties are mapped to the app tokens so the plates read as
+   ours in both themes: because every value references a token, the .dark
+   overrides in globals.css carry over with no extra rules. No literal
+   colours here. The plate itself is transparent — the line art floats
+   directly on the page with no card behind it. The glow flash below reports
+   a press for ~600ms and then rests; isokit's own reduced-motion rule
+   stills it. */
+
+.iso-figure {
+  --ik-panel: transparent;
+  --ik-top: var(--card);
+  --ik-front: var(--muted);
+  --ik-side: var(--secondary);
+  --ik-well: var(--muted);
+  --ik-line: var(--muted-foreground);
+  --ik-detail: var(--border);
+  --ik-live: var(--foreground);
+  --ik-ink: var(--muted-foreground);
+  --ik-ink-hi: var(--foreground);
+  --ik-screen: var(--card);
+  --ik-screen-ink: var(--foreground);
+  --ik-border: transparent;
+  --chapter-hue: 28;
+}
+
+.iso-padmount {
+  --chapter-hue: 330;
+}
+
+.iso-switchgear {
+  --chapter-hue: 90;
+}
+
+@keyframes iso-glow {
+  0% {
+    opacity: 1;
+  }
+  35% {
+    opacity: 0.2;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+.iso-figure svg .glow-target {
+  animation: iso-glow 600ms var(--ik-ease);
+}

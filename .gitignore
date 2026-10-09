@@ -17,8 +17,20 @@
 /.next/
 /out/
 
+# build output and generated assets
+/dist/
+/data/
+/public/icons/
+/public/images/
+/public/favicon*.ico
+/public/apple-touch-icon.png
+
 # production
 /build
+/data/*.sqlite
+/data/*.sqlite-*
+/data/**/*.png
+/public/figures/*.png
 
 # misc
 .DS_Store
