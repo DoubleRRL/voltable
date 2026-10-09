@@ -34,11 +34,11 @@ type ComposerProps = {
 const SHELL = { type: "spring", stiffness: 400, damping: 25, mass: 1.5 } as const;
 
 /** Narrow pill → open composer. The resting field is barely wider than the
- *  "Ask away" placeholder; on click it opens a touch wider. Both states stay
- *  single-line — planner prompts are short, and the shell grows naturally if
- *  a draft ever wraps to more. */
+ *  "Ask away" placeholder; on click it opens a touch wider, and the first
+ *  text takes it wider once more — after that only height moves. */
 const NARROW_COLLAPSED = 163;
-const NARROW_EXPANDED = 208;
+const NARROW_OPEN = 208;
+const NARROW_WIDE = 320;
 
 /**
  * The question field, wrapping the library's `InputMessage`.
@@ -85,6 +85,11 @@ export function Composer({
   // field or a stream to stop. An empty field is one text line, focused or
   // not — the growth on click is width, not height.
   const empty = !value.trim() && !busy;
+  // Two-stage growth: focus opens the pill a touch; a draft takes it wider
+  // once; after that only height moves as the draft wraps. The draft (not
+  // focus) drives the wide stage so tabbing away mid-draft never collapses
+  // it — and onBlur already keeps focus while a draft stands.
+  const hasDraft = value.trim().length > 0 || busy;
 
   // The inner height is content-driven (minRows), so measuring it never feeds
   // back into the shell animation. The card's own padding is read whenever the
@@ -115,7 +120,13 @@ export function Composer({
         // share one tree position, so React keeps this instance across the
         // switch and framer-motion would otherwise hold the pill's max-width
         // on the full-width conversation field.
-        maxWidth: narrow ? (focused ? NARROW_EXPANDED : NARROW_COLLAPSED) : "none",
+        maxWidth: narrow
+          ? !focused
+            ? NARROW_COLLAPSED
+            : hasDraft
+              ? NARROW_WIDE
+              : NARROW_OPEN
+          : "none",
       }}
       transition={SHELL}
       style={{ overflow: "hidden" }}
