@@ -34,9 +34,10 @@ type ComposerProps = {
 const SHELL = { type: "spring", stiffness: 400, damping: 25, mass: 1.5 } as const;
 
 /** Narrow pill → open composer. The resting field is barely wider than the
- *  "Ask away" placeholder; on click it opens to a modest multi-line box. */
-const NARROW_COLLAPSED = 280;
-const NARROW_EXPANDED = 440;
+ *  "Ask away" placeholder; on click it opens to a modest two-row box. Planner
+ *  prompts are short, so neither state spends a pixel it does not need. */
+const NARROW_COLLAPSED = 220;
+const NARROW_EXPANDED = 300;
 
 /**
  * The question field, wrapping the library's `InputMessage`.
@@ -49,7 +50,7 @@ const NARROW_EXPANDED = 440;
  * The shell is a collapsed single-line pill that springs open into a
  * multi-line composer on focus, reverse-engineered from the useLayouts
  * prompt-box: the card height tracks the measured content height, the textarea
- * opens from `minRows` 1 to 3, and it collapses back once the draft is empty.
+ * opens from `minRows` 1 to 2, and it collapses back once the draft is empty.
  * The card is the motion element (not the input wrapper) because the wrapper
  * sits inside the card's padding and cannot outgrow it.
  */
@@ -119,7 +120,7 @@ export function Composer({
     >
       <div
         ref={innerRef}
-        className="composer-bloom p-1"
+        className={cn("composer-bloom", collapsed ? "p-0" : "p-1")}
         data-draft={value.trim() ? "true" : "false"}
         data-collapsed={collapsed ? "true" : "false"}
       >
@@ -136,7 +137,7 @@ export function Composer({
           history={history}
           suggestions={[]}
           placeholder={placeholder}
-          minRows={focused ? 3 : 1}
+          minRows={focused ? 2 : 1}
           maxRows={8}
           sendLabel="Send"
           rightSlot={

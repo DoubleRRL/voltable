@@ -67,7 +67,11 @@ as a second answer competing with the first, so it is gone: while streaming
 the badge area says "Writing…", and once settled each figure and citation sits
 under the answer it belongs to. There is no right-hand rail; the conversation
 is a single `max-w-3xl` column so an evidence column can never squeeze the
-answer or orphan the citations from their turn.
+answer or orphan the citations from their turn. And a not-covered answer
+shows no Sources section at all: near-miss chunks are handed back as
+citations, not as evidence, and listing them under a "Sources" header claims
+support they explicitly do not give. The refusal stays three surfaces — badge,
+one-line prose, nearest-chapter notice — never four.
 
 **No verdict while streaming.** An assistant message starts life with no
 evidence, and its default grounding is "none" — so the first paint showed a
@@ -154,17 +158,18 @@ figure stays reachable with zero motion. Empty state only; the conversation
 view never shows figures unasked.
 
 **The composer is a pill that opens, not a box.** The resting empty-state
-field is 280px of placeholder ("Ask away") — barely bigger than the text —
-and springs to 440px with a three-row textarea on focus (spring 400/25/1.5,
+field is 220×~59px of placeholder ("Ask away") — barely bigger than the text —
+and springs to 300px with a two-row textarea on focus (spring 400/25/1.5,
 the prompt-box shell this reverses-engineers), collapsing back once the draft
-is empty. Collapsed it is one line with no footer and tightened padding
-(~79px tall): the send control is hidden on an empty draft anyway, so the row
-is dead height — but never while busy, because the footer carries Stop
-mid-stream. Planner prompts are short; the field stays small because it is
-used small. The SEND ARROW is a state indicator, not a bloom: it rests hidden
-until there is something to send. It rides 160ms, a measured audit token
-matching the moderate tier's timescale. There is no field halo — it was tried
-and rejected.
+is empty. Collapsed it is one line with no footer and tightened padding all
+the way down (card, inner, and the vendor container's own padding, each
+scoped to the collapsed state); the send control is hidden on an empty draft
+anyway, so the row is dead height — but never while busy, because the footer
+carries Stop mid-stream. Planner prompts are short; the field stays small
+because it is used small. The SEND ARROW is a state indicator, not a bloom:
+it rests hidden until there is something to send. It rides 160ms, a measured
+audit token matching the moderate tier's timescale. There is no field halo —
+it was tried and rejected.
 
 **Verify UI changes against the staged runtime, never `next dev`.** `next dev`
 in this repo serves SSR HTML whose client chunks do not resolve, so the page

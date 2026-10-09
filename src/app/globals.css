@@ -903,10 +903,14 @@
 .composer-bloom[data-collapsed="true"] > div > div.justify-between {
   display: none;
 }
-/* The pill also tightens its own padding. Unlayered, so it wins over the
- * `p-3` utility on the card without `!important`. */
+/* The pill tightens its own padding and the vendor container's. Unlayered,
+ * so both win over the `p-2`/`p-3` utilities on the card without
+ * `!important`. Scoped to the collapsed state so the open field keeps room. */
 .composer-field.composer-collapsed {
-  padding: 6px;
+  padding: 4px;
+}
+.composer-bloom[data-collapsed="true"] > div {
+  padding: 4px;
 }
 /* The send arrow is a state indicator, not a bloom: it rests hidden until
  * there is something to send. 160ms is a measured audit token and matches the

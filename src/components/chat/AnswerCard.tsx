@@ -243,7 +243,7 @@ export function AnswerCard({
         </div>
       ) : null}
 
-      {hasSources ? (
+      {hasSources && !message.notCovered ? (
         <div className="border-t border-[color:var(--border)] pt-2">
           <EvidenceRail citations={message.citations} />
         </div>

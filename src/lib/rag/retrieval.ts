@@ -81,19 +81,29 @@ export const analyzeQuery = (question: string, visualFirst = false): QueryIntent
 };
 
 /**
- * Unit synonyms.
+ * ESR-domain synonyms.
  *
  * The ESR writes units as symbols ("mG", "ft", "1φ", "kVA") while users type
- * them as words ("milligauss", "feet", "single phase"). Without this the
- * highest-value chunks were unreachable: a question about "milligauss" scored
- * zero coverage against a figure whose only text was "MAX B = 12 mG", so the
- * figure was never retrieved even though it held the answer.
+ * them as words ("milligauss", "feet", "single phase"), and it writes verdicts
+ * as nouns ("Acceptability") while users ask with adjectives ("acceptable",
+ * "approved"). Without this the highest-value chunks were unreachable: a
+ * question about "milligauss" scored zero coverage against a figure whose
+ * only text was "MAX B = 12 mG", and a question asking whether 301A is
+ * "acceptable" scored 1/3 against a table whose header says "Acceptability" —
+ * so the whole query fell below the coverage gate while two chunks each
+ * covered two thirds of it.
  *
  * Applied to both the question and the chunk text at scoring time, so no
  * re-index is needed to benefit.
  */
 const UNIT_ALIASES: Record<string, string[]> = {
   milligauss: ["mg", "maximum"],
+  approved: ["acceptable", "acceptability", "approval"],
+  acceptable: ["approved", "acceptability", "approval"],
+  acceptability: ["acceptable", "approved"],
+  approval: ["approved", "acceptable"],
+  approvals: ["approved", "acceptable"],
+  unapproved: ["unacceptable"],
   gauss: ["mg", "milligauss"],
   maximum: ["max", "mg", "milligauss"],
   max: ["maximum", "mg"],
@@ -208,7 +218,17 @@ const scoreChunk = (
   intent: QueryIntent,
   bm25ById: Map<string, number>
 ): Scored => {
-  const coverage = coverageOf(chunk.text, intent.contentTokens);
+  // Coverage reads the section heading together with the text. A chunk's
+  // heading is part of its meaning — citations already display it for exactly
+  // this reason — and table chunks are systematically stripped of context at
+  // ingest (the EUSERC table's text starts at "--- | --- | ---", with neither
+  // its title nor the word EUSERC). Scoring the body alone makes a table
+  // cover one token in three while sitting at the top of the ranking, which
+  // fails the coverage gate on a question the corpus answers.
+  const coverage = coverageOf(
+    `${chunk.section ?? ""}\n${chunk.text}`,
+    intent.contentTokens,
+  );
   const bm25 = bm25ById.get(chunk.id);
   const lexical = bm25 === undefined ? 0 : bm25Strength(bm25);
 
@@ -310,188 +330,174 @@ export const retrieveChunks = async (
   // code column into unreadable order — so the model gets a table it cannot
   // read. Second, a table verdict is frequently a code ("U") defined by a
   // short text chunk on the same page ("U = Unacceptable") that the question's
-  // terms never match — so the model gets a code it can only guess at. The
-  // markdown table (resolved through the shared pair group) and the page's
-  // short text both ride directly behind their table at just under its score:
-  // positioned as attachments, never ranked on their own, capped so one table
-  // cannot flood the context. A legend that already matched on its own is
-  // repositioned rather than duplicated — leaving it where BM25 put it usually
-  // means leaving it below the top-K cut.
+  // terms never match — so the model gets a code it can only guess at.
+  //
+  // So each table forms one group at the position of its first appearance
+  // (the table itself, or the OCR rendering that matched): the markdown
+  // table, then the page's short text. A group never reorders anything above
+  // its own slot; short text already above a table stays where BM25 put it.
+  // The OCR sibling is dropped when the markdown subsumes it (real pipe
+  // structure), so the pair does not eat two of the four context slots.
+  // Tables travel with their key and their legend. Two retrieval gaps conspire
+  // against table questions. First, the clean markdown table often loses to
+  // its own OCR sibling (same words, denser BM25), and the OCR flow drops the
+  // code column into unreadable order — so the model gets a table it cannot
+  // read. Second, a table verdict is frequently a code ("U") defined by a
+  // short text chunk on the same page ("U = Unacceptable") that the question's
+  // terms never match — so the model gets a code it can only guess at.
+  //
+  // So each table forms one group at the position of its first appearance
+  // (the table itself, or the OCR rendering that matched): the markdown
+  // table, then the page's short text. A group never reorders anything above
+  // its own slot; short text already above a table stays where BM25 put it.
+  // The OCR sibling is dropped when the markdown subsumes it (real pipe
+  // structure), so the pair does not eat two of the four context slots.
   const withLegends = (() => {
-    const tableScoreByPage = new Map<number, number>();
-    for (const s of merged) {
-      if (s.chunk.chunkType === "table" && !tableScoreByPage.has(s.chunk.page)) {
-        tableScoreByPage.set(s.chunk.page, s.score);
+    const heads = (() => {
+      const ids = [
+        ...new Set(
+          merged
+            .filter((s) => s.chunk.chunkType !== "table" && s.chunk.pairGroupId)
+            .map((s) => s.chunk.pairGroupId as string),
+        ),
+      ];
+      return new Map(
+        (ids.length > 0 ? getStoredChunksByIds(ids) : []).map((h) => [h.id, h]),
+      );
+    })();
+    type Group = {
+      table: StoredChunk;
+      ocrId: string | null;
+      slot: number;
+      page: number;
+    };
+    const groups: Group[] = [];
+    const groupedTables = new Set<string>();
+    merged.forEach((s, i) => {
+      let table: StoredChunk | null = null;
+      let ocrId: string | null = null;
+      if (s.chunk.chunkType === "table") {
+        table = s.chunk;
+      } else if (s.chunk.pairGroupId) {
+        const head = heads.get(s.chunk.pairGroupId);
+        if (head && head.chunkType === "table" && head.id !== s.chunk.id) {
+          table = head;
+          ocrId = s.chunk.id;
+        }
+      }
+      if (!table || groupedTables.has(table.id)) return;
+      groupedTables.add(table.id);
+      groups.push({ table, ocrId, slot: i, page: table.page });
+    });
+    if (groups.length === 0) return merged;
+    const inList = new Set(merged.map((s) => s.chunk.id));
+    // Fresh short text per grouped page (legends, footnotes, titles).
+    const pages = [...new Set(groups.map((g) => g.page))];
+    const freshByPage = new Map<number, StoredChunk[]>();
+    for (const legend of getShortTextChunksByPages(pages)) {
+      if (inList.has(legend.id)) continue;
+      const list = freshByPage.get(legend.page) ?? [];
+      list.push(legend);
+      freshByPage.set(legend.page, list);
+    }
+    // Short text already in the ranking that belongs to a group moves up to
+    // it — but only from below its slot. A legend that already matched on its
+    // own above the table is left exactly where it is.
+    const movingByGroup = new Map<Group, typeof merged>();
+    const movingIds = new Set<string>();
+    // A markdown table sitting below its own OCR trigger is pulled up to the
+    // group slot with it — leaving it where BM25 put it usually means leaving
+    // it below the top-K cut while its lossy OCR sibling leads.
+    for (const group of groups) {
+      if (!inList.has(group.table.id)) continue;
+      const at = merged.findIndex((s) => s.chunk.id === group.table.id);
+      if (at > group.slot) {
+        movingIds.add(group.table.id);
       }
     }
-    // A table's OCR rendering counts as the table: it shares the pair group,
-    // and it is usually the thing that actually matched.
-    const ocrHeadIds = [
-      ...new Set(
-        merged
-          .filter((s) => s.chunk.chunkType !== "table" && s.chunk.pairGroupId)
-          .map((s) => s.chunk.pairGroupId as string),
-      ),
-    ];
-    const heads = ocrHeadIds.length > 0 ? getStoredChunksByIds(ocrHeadIds) : [];
-    const pendingByAfterId = new Map<string, { table: StoredChunk; score: number }>();
+    merged.forEach((s, i) => {
+      if (s.chunk.chunkType !== "text" || s.chunk.text.length > 400) return;
+      const group = groups.find((g) => g.page === s.chunk.page && i > g.slot);
+      if (!group || movingIds.has(s.chunk.id)) return;
+      movingIds.add(s.chunk.id);
+      const list = movingByGroup.get(group) ?? [];
+      list.push(s);
+      movingByGroup.set(group, list);
+    });
+    const usedLegends = new Set<string>();
+    const emittedTables = new Set<string>();
+    const out: typeof merged = [];
+    const emitGroup = (group: Group, anchorScore: number) => {
+      if (emittedTables.has(group.table.id)) return;
+      emittedTables.add(group.table.id);
+      const natural = merged.find((s) => s.chunk.id === group.table.id) ?? null;
+      if (!inList.has(group.table.id)) {
+        // The markdown table itself, scored just under its anchor so the
+        // order is explicit. A table already in the ranking keeps its natural
+        // score — re-scoring it down would demote evidence BM25 placed.
+        out.push({
+          ...scoreChunk(group.table, intent, bm25ById),
+          score: anchorScore - 0.0005,
+        });
+      } else if (natural && movingIds.has(group.table.id)) {
+        // Relocated from below: same entry, kept score, new position.
+        out.push(natural);
+      }
+      // Definitions first: a "U = Unacceptable" line is the key, an acronym
+      // expansion is not. Two legend slots per group; the top-K slice does
+      // the rest.
+      const candidates: Array<{
+        key: string;
+        text: string;
+        make: (score: number) => (typeof merged)[number];
+      }> = [
+        ...(freshByPage.get(group.page) ?? []).map((legend) => ({
+          key: legend.id,
+          text: legend.text,
+          make: (score: number) => ({ ...scoreChunk(legend, intent, bm25ById), score }),
+        })),
+        ...(movingByGroup.get(group) ?? []).map((moved) => ({
+          key: moved.chunk.id,
+          text: moved.chunk.text,
+          make: (score: number) => ({ ...moved, score }),
+        })),
+      ].filter((c) => !usedLegends.has(c.key));
+      candidates
+        .sort((a, b) => {
+          const ka = a.text.includes("=") ? 0 : 1;
+          const kb = b.text.includes("=") ? 0 : 1;
+          return ka - kb;
+        })
+        .slice(0, 2)
+        .forEach((c, k) => {
+          usedLegends.add(c.key);
+          out.push(c.make(anchorScore - 0.001 * (k + 1)));
+        });
+    };
     for (const s of merged) {
-      const headId = s.chunk.pairGroupId;
-      if (!headId) continue;
-      const head = heads.find((h) => h.id === headId);
-      if (
-        !head ||
-        head.chunkType !== "table" ||
-        head.id === s.chunk.id ||
-        merged.some((m) => m.chunk.id === head.id) ||
-        tableScoreByPage.has(head.page)
-      ) {
+      if (movingIds.has(s.chunk.id)) continue;
+      const group = groups.find(
+        (g) =>
+          !emittedTables.has(g.table.id) &&
+          (s.chunk.id === g.table.id || (g.ocrId !== null && s.chunk.id === g.ocrId)),
+      );
+      if (!group) {
+        out.push(s);
         continue;
       }
-      tableScoreByPage.set(head.page, s.score);
-      if (!pendingByAfterId.has(s.chunk.id)) {
-        pendingByAfterId.set(s.chunk.id, { table: head, score: s.score });
-      }
-    }
-    if (tableScoreByPage.size === 0) return merged;
-    const seen = new Set(merged.map((s) => s.chunk.id));
-    const legends = getShortTextChunksByPages([...tableScoreByPage.keys()]).filter(
-      (c) => !seen.has(c.id),
-    );
-    if (legends.length === 0 && pendingByAfterId.size === 0) {
-      // Nothing new to attach, but a legend may already sit below its table —
-      // pull it up next to it.
-      return repositionLegends(merged, tableScoreByPage);
-    }
-    const byPage = new Map<number, StoredChunk[]>();
-    for (const legend of legends) {
-      const list = byPage.get(legend.page) ?? [];
-      list.push(legend);
-      byPage.set(legend.page, list);
-    }
-    const out: typeof merged = [];
-    let attached = 0;
-    for (const s of merged) {
-      const pending = pendingByAfterId.get(s.chunk.id);
-      const canAttach = pending !== undefined && !seen.has(pending.table.id) && attached < 8;
-      // A markdown table with real pipe structure subsumes its OCR sibling:
-      // same table, cleaner reading, and the pair must not eat two of the
-      // four context slots. Without pipes the markdown may be the worse
-      // rendering, so both stay.
-      const dropSibling = canAttach && pending.table.text.includes("|");
-      if (!dropSibling) {
+      // The OCR trigger is dropped when the markdown subsumes it; otherwise
+      // the trigger stays and the table follows it.
+      const dropOcr =
+        group.ocrId !== null &&
+        s.chunk.id === group.ocrId &&
+        group.table.text.includes("|");
+      if (!dropOcr) {
         out.push(s);
       }
-      let anchor: { page: number; score: number } | null =
-        s.chunk.chunkType === "table" ? { page: s.chunk.page, score: s.score } : null;
-      if (canAttach && pending) {
-        seen.add(pending.table.id);
-        attached += 1;
-        out.push({
-          ...scoreChunk(pending.table, intent, bm25ById),
-          score: pending.score - 0.0005,
-        });
-        anchor = { page: pending.table.page, score: pending.score };
-      }
-      if (!anchor || attached >= 8) continue;
-      for (const legend of (byPage.get(anchor.page) ?? []).slice(0, 2)) {
-        if (seen.has(legend.id)) continue;
-        seen.add(legend.id);
-        attached += 1;
-        out.push({ ...scoreChunk(legend, intent, bm25ById), score: anchor.score - 0.001 });
-      }
-    }
-    return repositionLegends(out, tableScoreByPage);
-  })();
-
-  /**
-   * Move a same-page short text chunk up next to its table when BM25 stranded
-   * it below. Only demotes nothing: a legend already above its table stays.
-   */
-  function repositionLegends(
-    list: typeof merged,
-    tableScoreByPage: Map<number, number>,
-  ): typeof merged {
-    void tableScoreByPage;
-    const anchorIndexByPage = new Map<number, number>();
-    list.forEach((s, i) => {
-      if (
-        (s.chunk.chunkType === "table" ||
-          (s.chunk.pairGroupId &&
-            list.some(
-              (m) => m.chunk.id === s.chunk.pairGroupId && m.chunk.chunkType === "table",
-            ))) &&
-        !anchorIndexByPage.has(s.chunk.page)
-      ) {
-        anchorIndexByPage.set(s.chunk.page, i);
-      }
-    });
-    if (anchorIndexByPage.size === 0) return list;
-    const pages = new Set(anchorIndexByPage.keys());
-    const shortOnPage = (s: (typeof list)[number]) =>
-      s.chunk.chunkType === "text" &&
-      pages.has(s.chunk.page) &&
-      s.chunk.text.length <= 400;
-    const moving = new Set(
-      list
-        .filter((s) => {
-          const anchor = anchorIndexByPage.get(s.chunk.page);
-          if (anchor === undefined || !shortOnPage(s)) return false;
-          return list.indexOf(s) > anchor;
-        })
-        .map((s) => s.chunk.id),
-    );
-    if (moving.size === 0) return list;
-    const held = new Map<number, typeof list>();
-    const rest = list.filter((s) => {
-      if (!moving.has(s.chunk.id)) return true;
-      const group = held.get(s.chunk.page) ?? [];
-      group.push(s);
-      held.set(s.chunk.page, group);
-      return false;
-    });
-    const out: typeof list = [];
-    const emitted = new Set<number>();
-    // Tables in this list, by page: the held legends go behind the table
-    // itself, never between a table and the OCR that matched it. Emitting at
-    // the OCR would wedge the legends between the two and push the table
-    // itself below the top-K cut — the exact failure this exists to prevent.
-    const tablePages = new Set(
-      list.filter((s) => s.chunk.chunkType === "table").map((s) => s.chunk.page),
-    );
-    for (const s of rest) {
-      out.push(s);
-      const isTable = s.chunk.chunkType === "table";
-      const isLoneAnchor =
-        !isTable &&
-        tablePages.size > 0 &&
-        !tablePages.has(s.chunk.page) &&
-        pendingAnchor(s);
-      if ((isTable || isLoneAnchor) && !emitted.has(s.chunk.page)) {
-        emitted.add(s.chunk.page);
-        const group = held.get(s.chunk.page) ?? [];
-        // Re-score just under the anchor so the order is explicit, not
-        // accidental. Never above the anchor itself. Definitions first: a
-        // "U = Unacceptable" line is the key, an acronym expansion is not.
-        const anchorScore = s.score;
-        const ordered = [...group].sort((a, b) => {
-          const ka = a.chunk.text.includes("=") ? 0 : 1;
-          const kb = b.chunk.text.includes("=") ? 0 : 1;
-          return ka - kb;
-        });
-        ordered.slice(0, 2).forEach((g, k) => {
-          out.push({ ...g, score: anchorScore - 0.001 * (k + 1) });
-        });
-      }
+      emitGroup(group, s.score);
     }
     return out;
-
-    function pendingAnchor(s: (typeof list)[number]): boolean {
-      const headId = s.chunk.pairGroupId;
-      if (!headId || s.chunk.chunkType === "table") return false;
-      return rest.some((m) => m.chunk.id === headId && m.chunk.chunkType === "table");
-    }
-  }
+  })();
 
   const top = withLegends[0];
   const confidence = top?.confidence ?? 0;

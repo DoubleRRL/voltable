@@ -131,7 +131,7 @@ export function ChatApp() {
               <FigureCarousel />
               <Composer
                 narrow
-                fieldClassName={cn("mx-auto w-full p-3", surfaceClasses(1, 2), shape.container)}
+                fieldClassName={cn("mx-auto w-full p-2", surfaceClasses(1, 2), shape.container)}
                 value={input}
                 onValueChange={setInput}
                 onSend={(question) => void sendQuestion(question)}
