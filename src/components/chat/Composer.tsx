@@ -25,10 +25,18 @@ type ComposerProps = {
   className?: string;
   /** Extra content rendered at the top of the card, above the field. */
   children?: React.ReactNode;
+  /** Empty-state sizing: a narrow pill that springs open on focus. The
+   *  conversation composer is already full-width, so it leaves this off. */
+  narrow?: boolean;
 };
 
 /** Matches the reference shell: stiffness 400 / damping 25 / mass 1.5. */
 const SHELL = { type: "spring", stiffness: 400, damping: 25, mass: 1.5 } as const;
+
+/** Narrow pill → open composer. The resting field is barely wider than the
+ *  "Ask away" placeholder; on click it opens to a modest multi-line box. */
+const NARROW_COLLAPSED = 280;
+const NARROW_EXPANDED = 440;
 
 /**
  * The question field, wrapping the library's `InputMessage`.
@@ -53,9 +61,10 @@ export function Composer({
   busy,
   history,
   fieldClassName,
-  placeholder = "Ask a clearance, bonding, or service question…",
+  placeholder = "Ask away",
   className,
   children,
+  narrow = false,
 }: ComposerProps) {
   const [focused, setFocused] = useState(false);
   const cardRef = useRef<HTMLDivElement>(null);
@@ -93,7 +102,14 @@ export function Composer({
       ref={cardRef}
       className={cn("composer-field", fieldClassName)}
       initial={false}
-      animate={{ height: Math.round(innerH + pad) }}
+      animate={{
+        height: Math.round(innerH + pad),
+        // "none", not undefined: the empty-state and conversation composers
+        // share one tree position, so React keeps this instance across the
+        // switch and framer-motion would otherwise hold the pill's max-width
+        // on the full-width conversation field.
+        maxWidth: narrow ? (focused ? NARROW_EXPANDED : NARROW_COLLAPSED) : "none",
+      }}
       transition={SHELL}
       style={{ overflow: "hidden" }}
     >

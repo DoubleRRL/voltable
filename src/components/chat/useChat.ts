@@ -403,25 +403,6 @@ export function useChat() {
   // a short transcript. Left un-memoized on purpose: the React Compiler already
   // memoizes them, and hand-wrapping them only fights it.
 
-  /**
-   * The citations of the newest settled answer that has any, for the evidence
-   * rail. An answer with nothing citable has no rail: its figures already sit
-   * inline, and a rail headed "Sources 0" is a hole, not information.
-   */
-  const latestCitations = (() => {
-    for (let i = messages.length - 1; i >= 0; i -= 1) {
-      const message = messages[i];
-      if (message.role !== "assistant" || message.streaming || message.error) {
-        continue;
-      }
-      if (message.citations.length === 0) {
-        continue;
-      }
-      return message.citations;
-    }
-    return null;
-  })();
-
   /** True when the newest question repeats the one before it. */
   const duplicateQuestion = (() => {
     const questions = messages
@@ -440,7 +421,6 @@ export function useChat() {
     busy,
     visualFirst,
     history,
-    latestCitations,
     duplicateQuestion,
     setInput,
     setVisualFirst,

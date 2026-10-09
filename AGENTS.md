@@ -42,13 +42,32 @@ deleted toggle set it, so every `matchesPhaseFilter` call compared against
 Handing a planner a 28 MB PDF in a new tab loses the question, the answer and
 the transcript — on a live call there may not be time to get back.
 
+**Figures are thumbnails, not posters.** A diagram renders inline at 112px
+with a page badge; activating it opens `FigureLightbox` — the full-resolution
+crop, its OCR text, and a corner handle that drag-resizes the panel, because
+on a live call the planner has to read a dimension off the drawing and a
+thumbnail cannot carry one. The lightbox lives outside `Dialog` on purpose:
+the stock dialog is fixed-size and there is no resizeable-modal primitive to
+install, so the panel is a thin custom surface that still speaks the system
+(surface tokens, container radius, spring tiers for mount, 1:1 pointer
+tracking for the drag itself).
+
 **Saved answers are a dialog, not a sidebar and not a tab pair.** One route,
 opened from the floating edge cluster as `Dialog size="lg"`; a saved answer is
-a destination you scroll through, not a mode the page switches into. A sidebar
-would take width the evidence rail already owns at `lg:w-80` and squeeze the
-answer. Saves live in `localStorage` with their citations intact, because a
-bookmark that lost its citations would be a liability rather than a shortcut.
+a destination you scroll through, not a mode the page switches into. Saves live
+in `localStorage` with their citations intact, because a bookmark that lost its
+citations would be a liability rather than a shortcut.
 The `TabsSubtle` idea died with the header bar.
+
+**An answer reads top to bottom: text, figures, sources.** The direct answer
+and prose come first, then the figure thumbnails, then a "Sources" section
+with the citations — the shape every modern answer UI converged on. The
+retrieval trail ("How this was found") used to sit above the answer and read
+as a second answer competing with the first, so it is gone: while streaming
+the badge area says "Writing…", and once settled each figure and citation sits
+under the answer it belongs to. There is no right-hand rail; the conversation
+is a single `max-w-3xl` column so an evidence column can never squeeze the
+answer or orphan the citations from their turn.
 
 **isokit motion tokens are vendor-owned.** The FF audit flags `260ms`/`200ms`
 transitions inside figure SVGs and measured heights like `20px`/`44px`/`48px`
@@ -107,14 +126,15 @@ the carousel never mounts — the static three-up row renders instead so every
 figure stays reachable with zero motion. Empty state only; the conversation
 view never shows figures unasked.
 
-**The composer has two separate things, deliberately.** The FIELD BLOOM is a
-halo that radiates from the composer card on `:focus-within` — the field
-lighting up. It lives on `.composer-field` (the card in `ChatApp`), not on
-`.composer-bloom` (the input wrapper), because the halo must ring the visible
-surface and the wrapper sits 12px inside it. It is a pseudo-element, so it
-costs the vendor `InputMessage` nothing. The SEND ARROW is a state indicator,
-not a bloom: it rests hidden until there is something to send. Both ride
-160ms, a measured audit token matching the moderate tier's timescale.
+**The composer is a pill that opens, not a box.** The resting empty-state
+field is 280px of placeholder ("Ask away") — barely bigger than the text —
+and springs to 440px with a three-row textarea on focus (spring 400/25/1.5,
+the prompt-box shell this reverses-engineers), collapsing back once the draft
+is empty. Planner prompts are short; the field stays small because it is used
+small. The SEND ARROW is a state indicator, not a bloom: it rests hidden until
+there is something to send. It rides 160ms, a measured audit token matching
+the moderate tier's timescale. There is no field halo — it was tried and
+rejected.
 
 **Verify UI changes against the staged runtime, never `next dev`.** `next dev`
 in this repo serves SSR HTML whose client chunks do not resolve, so the page

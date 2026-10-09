@@ -896,23 +896,6 @@
   .scrollbar-hide::-webkit-scrollbar {
     display: none;
 }
-/* Composer: the resting field is a compact single-line pill; on focus it
- * springs open into a multi-line composer. Reverse-engineered from the
- * useLayouts prompt-box — the shell springs its height and width, the
- * textarea opens from collapsed to measured, and it collapses back once the
- * draft is empty (spring 400/25/1.5).
- *
- * The width growth lives on `.composer-scope` (the outer container) rather than
- * the card, because the card is `w-full` and cannot outgrow its parent. */
-.composer-scope {
-  max-width: 42rem;
-  margin-inline: auto;
-  transition: max-width 320ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-.composer-scope:focus-within {
-  max-width: 52rem;
-}
-
 /* The send arrow is a state indicator, not a bloom: it rests hidden until
  * there is something to send. 160ms is a measured audit token and matches the
  * moderate tier's timescale. */
@@ -929,7 +912,6 @@
   transform: none;
 }
 @media (prefers-reduced-motion: reduce) {
-  .composer-scope,
   .composer-bloom [aria-label="Send"] {
     transition: none;
   }

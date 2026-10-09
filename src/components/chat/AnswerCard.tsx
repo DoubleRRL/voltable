@@ -12,6 +12,7 @@ import { motion } from "framer-motion";
 
 import { spring } from "@/lib/springs";
 import { FigureCard } from "./FigureCard";
+import { EvidenceRail } from "./EvidenceRail";
 import { GroundingBadge } from "./GroundingBadge";
 import { NotCoveredNotice } from "./NotCoveredNotice";
 import type { SavedAnswer } from "./useSavedAnswers";
@@ -163,10 +164,9 @@ type AnswerCardProps = {
 
 /**
  * The assistant's answer: the one-line answer, the prose behind it, the stored
- * exceptions that came with the cited visuals, and the diagrams themselves.
- *
- * Figures always render here. The evidence rail carries citations only, so a
- * diagram shown for the newest answer was simply absent from the screen.
+ * exceptions that came with the cited visuals, the diagrams as small
+ * thumbnails, and the sources underneath — answer, figures, sources, in that
+ * order, the way a planner reads them.
  */
 export function AnswerCard({
   message,
@@ -178,6 +178,7 @@ export function AnswerCard({
   const shape = useShape();
   const figures = message.figures;
   const chapters = message.retrievalSummary?.chapters ?? [];
+  const hasSources = message.citations.length > 0;
 
   return (
     <Card
@@ -225,10 +226,16 @@ export function AnswerCard({
       <Exceptions exceptions={message.exceptions} />
 
       {figures.length > 0 ? (
-        <div className="flex flex-col gap-2">
+        <div className="flex flex-wrap gap-2" aria-label="Figures">
           {figures.map((figure) => (
             <FigureCard key={figure.id} figure={figure} />
           ))}
+        </div>
+      ) : null}
+
+      {hasSources ? (
+        <div className="border-t border-[color:var(--border)] pt-2">
+          <EvidenceRail citations={message.citations} />
         </div>
       ) : null}
 

@@ -15,7 +15,6 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { ScrollArea } from "@/components/ui/scroll-area";
 
 import { Composer } from "./Composer";
-import { EvidenceRail } from "./EvidenceRail";
 import { SavedList } from "./SavedList";
 import { useSavedAnswers, type SavedAnswer } from "./useSavedAnswers";
 import { MessageList } from "./MessageList";
@@ -32,7 +31,6 @@ export function ChatApp() {
     input,
     busy,
     history,
-    latestCitations,
     duplicateQuestion,
     setInput,
     sendQuestion,
@@ -129,9 +127,10 @@ export function ChatApp() {
 
         {!hasConversation ? (
           <main className="flex flex-1 items-center justify-center px-4 py-10">
-            <div className="composer-scope flex w-full flex-col gap-4">
+            <div className="mx-auto flex w-full max-w-2xl flex-col gap-4">
               <FigureCarousel />
               <Composer
+                narrow
                 fieldClassName={cn("mx-auto w-full p-3", surfaceClasses(1, 2), shape.container)}
                 value={input}
                 onValueChange={setInput}
@@ -143,8 +142,8 @@ export function ChatApp() {
             </div>
           </main>
         ) : (
-          <main className="flex flex-1 flex-col gap-4 px-4 pb-4 pt-14 lg:flex-row lg:items-start">
-            <div className="flex min-w-0 flex-1 flex-col gap-4">
+          <main className="flex flex-1 flex-col gap-4 px-4 pb-4 pt-14">
+            <div className="mx-auto flex w-full max-w-3xl min-w-0 flex-col gap-4">
               <MessageList messages={messages} onSave={handleSave} isSaved={isSaved} />
               <Composer
                 fieldClassName={cn("sticky bottom-0 flex flex-col gap-1 pt-2", surfaceClasses(1, 2))}
@@ -162,18 +161,6 @@ export function ChatApp() {
                 ) : null}
               </Composer>
             </div>
-
-            {latestCitations ? (
-              <div
-                className={cn(
-                  "lg:sticky lg:top-4 lg:w-80 lg:shrink-0 lg:p-2",
-                  surfaceClasses(1, 2),
-                  shape.container
-                )}
-              >
-                <EvidenceRail citations={latestCitations} />
-              </div>
-            ) : null}
           </main>
         )}
       </div>
