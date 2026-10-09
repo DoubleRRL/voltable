@@ -158,18 +158,20 @@ figure stays reachable with zero motion. Empty state only; the conversation
 view never shows figures unasked.
 
 **The composer is a pill that opens, not a box.** The resting empty-state
-field is 220×~59px of placeholder ("Ask away") — barely bigger than the text —
-and springs to 300px with a two-row textarea on focus (spring 400/25/1.5,
-the prompt-box shell this reverses-engineers), collapsing back once the draft
-is empty. Collapsed it is one line with no footer and tightened padding all
-the way down (card, inner, and the vendor container's own padding, each
-scoped to the collapsed state); the send control is hidden on an empty draft
-anyway, so the row is dead height — but never while busy, because the footer
-carries Stop mid-stream. Planner prompts are short; the field stays small
-because it is used small. The SEND ARROW is a state indicator, not a bloom:
-it rests hidden until there is something to send. It rides 160ms, a measured
-audit token matching the moderate tier's timescale. There is no field halo —
-it was tried and rejected.
+field is 163×~59px of placeholder ("Ask away") — barely bigger than the text —
+and springs to 208px wide on focus (spring 400/25/1.5, the prompt-box shell
+this reverses-engineers). Both states stay single-line: the growth on click is
+width, not height, and the shell still grows if a draft ever wraps. The footer
+row hides while the field is empty — the send control is hidden on an empty
+draft anyway — but never while busy, because the footer carries Stop
+mid-stream. 37px tall was measured against and rejected: one text line alone
+is 36px and the vendor container carries 16px of padding, so anything under
+~50px clips text; the remaining ~7px over the floor is an a11y node that stays.
+Planner prompts are short; the field stays small because it is used small.
+The SEND ARROW is a state indicator, not a bloom: it rests hidden until there
+is something to send. It rides 160ms, a measured audit token matching the
+moderate tier's timescale. There is no field halo — it was tried and
+rejected.
 
 **Verify UI changes against the staged runtime, never `next dev`.** `next dev`
 in this repo serves SSR HTML whose client chunks do not resolve, so the page

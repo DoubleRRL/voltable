@@ -900,16 +900,16 @@
  * while the draft is empty anyway, so the whole row is dead height. The
  * selector reaches into the installed `InputMessage` (the row carrying the
  * send button), which is safe to restyle and forbidden to edit. */
-.composer-bloom[data-collapsed="true"] > div > div.justify-between {
+.composer-bloom[data-empty="true"] > div > div.justify-between {
   display: none;
 }
 /* The pill tightens its own padding and the vendor container's. Unlayered,
  * so both win over the `p-2`/`p-3` utilities on the card without
- * `!important`. Scoped to the collapsed state so the open field keeps room. */
-.composer-field.composer-collapsed {
+ * `!important`. Scoped to the empty state so a field with a draft keeps room. */
+.composer-field.composer-empty {
   padding: 4px;
 }
-.composer-bloom[data-collapsed="true"] > div {
+.composer-bloom[data-empty="true"] > div {
   padding: 4px;
 }
 /* The send arrow is a state indicator, not a bloom: it rests hidden until

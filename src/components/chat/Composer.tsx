@@ -34,10 +34,11 @@ type ComposerProps = {
 const SHELL = { type: "spring", stiffness: 400, damping: 25, mass: 1.5 } as const;
 
 /** Narrow pill → open composer. The resting field is barely wider than the
- *  "Ask away" placeholder; on click it opens to a modest two-row box. Planner
- *  prompts are short, so neither state spends a pixel it does not need. */
-const NARROW_COLLAPSED = 220;
-const NARROW_EXPANDED = 300;
+ *  "Ask away" placeholder; on click it opens a touch wider. Both states stay
+ *  single-line — planner prompts are short, and the shell grows naturally if
+ *  a draft ever wraps to more. */
+const NARROW_COLLAPSED = 163;
+const NARROW_EXPANDED = 208;
 
 /**
  * The question field, wrapping the library's `InputMessage`.
@@ -47,12 +48,15 @@ const NARROW_EXPANDED = 300;
  * is what a planner reaches for when the draft already has text in it — the
  * built-in control hides in that case because it would enqueue instead.
  *
- * The shell is a collapsed single-line pill that springs open into a
- * multi-line composer on focus, reverse-engineered from the useLayouts
- * prompt-box: the card height tracks the measured content height, the textarea
- * opens from `minRows` 1 to 2, and it collapses back once the draft is empty.
- * The card is the motion element (not the input wrapper) because the wrapper
- * sits inside the card's padding and cannot outgrow it.
+ * The shell is a collapsed single-line pill that springs open on focus,
+ * reverse-engineered from the useLayouts prompt-box: the card height tracks
+ * the measured content height and it collapses back once the draft is empty.
+ * Both states stay single-line (`minRows` 1 — the shell still grows if a
+ * draft wraps); the growth is width plus the send/status controls appearing.
+ * The footer row hides while the field is empty — the send control is hidden
+ * on an empty draft anyway — but never while busy, because the footer carries
+ * Stop mid-stream. The card is the motion element (not the input wrapper)
+ * because the wrapper sits inside the card's padding and cannot outgrow it.
  */
 export function Composer({
   value,
@@ -75,18 +79,16 @@ export function Composer({
 
   const onFocus = () => setFocused(true);
   const onBlur = () => {
-    // Collapse back to the pill only when there is nothing to send — a draft
-    // keeps the field open so the planner can keep typing.
     if (!value.trim()) setFocused(false);
   };
-  // The resting pill is one line with no footer: the send control is hidden
-  // while the draft is empty anyway, so the whole row is dead height. Never
-  // collapse while busy — the footer carries the Stop control mid-stream.
-  const collapsed = !focused && !value.trim() && !busy;
+  // The footer (send/stop row) shows only when there is something in the
+  // field or a stream to stop. An empty field is one text line, focused or
+  // not — the growth on click is width, not height.
+  const empty = !value.trim() && !busy;
 
   // The inner height is content-driven (minRows), so measuring it never feeds
   // back into the shell animation. The card's own padding is read whenever the
-  // collapsed state changes, because the pill uses tighter padding.
+  // empty state changes, because the pill uses tighter padding.
   useEffect(() => {
     const inner = innerRef.current;
     if (inner) {
@@ -100,12 +102,12 @@ export function Composer({
       const cs = getComputedStyle(card);
       setPad(parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom));
     }
-  }, [collapsed]);
+  }, [empty]);
 
   return (
     <motion.div
       ref={cardRef}
-      className={cn("composer-field", collapsed && "composer-collapsed", fieldClassName)}
+      className={cn("composer-field", empty && "composer-empty", fieldClassName)}
       initial={false}
       animate={{
         height: Math.round(innerH + pad),
@@ -120,9 +122,9 @@ export function Composer({
     >
       <div
         ref={innerRef}
-        className={cn("composer-bloom", collapsed ? "p-0" : "p-1")}
+        className={cn("composer-bloom", empty ? "p-0" : "p-1")}
         data-draft={value.trim() ? "true" : "false"}
-        data-collapsed={collapsed ? "true" : "false"}
+        data-empty={empty ? "true" : "false"}
       >
         {children}
         <InputMessage
@@ -137,7 +139,7 @@ export function Composer({
           history={history}
           suggestions={[]}
           placeholder={placeholder}
-          minRows={focused ? 2 : 1}
+          minRows={1}
           maxRows={8}
           sendLabel="Send"
           rightSlot={
