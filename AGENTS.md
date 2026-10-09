@@ -69,6 +69,33 @@ under the answer it belongs to. There is no right-hand rail; the conversation
 is a single `max-w-3xl` column so an evidence column can never squeeze the
 answer or orphan the citations from their turn.
 
+**No verdict while streaming.** An assistant message starts life with no
+evidence, and its default grounding is "none" — so the first paint showed a
+red "Not in ESR" badge next to "Writing…", which read as the answer before
+there was one. While streaming the badge is a neutral gray "Checking…"; the
+verdict renders only once the stream settles.
+
+**Coded table cells never go to the model alone.** A table verdict is often a
+single letter ("U") defined by a legend line on the same page ("U =
+Unacceptable") that the question's terms never match — so retrieval returned
+the table without its key and the model expanded the code from prior
+knowledge, then misread the row on top of it (it attached row 1's `A` to
+`301A` while quoting the row that says `U`). Three fixes, all in
+`src/lib/rag`:
+
+- Tables travel with their key and legend. The clean markdown table is pulled
+  in behind its OCR sibling through the shared pair group (the OCR flow drops
+  the code column into unreadable order), and same-page short text rides
+  behind the table — positioned as attachments, capped, and repositioned up
+  next to the table when BM25 strands them below the top-K cut. The OCR
+  sibling is dropped when the markdown subsumes it so the pair does not eat
+  two of the four context slots.
+- The prompt forbids expanding a code from anything but a legend in context.
+- `resolveTableCode` answers outright when the question names the row key and
+  exactly one row plus its legend are in context: no ~7s model call, and the
+  row and legend line are quoted verbatim (the fuzzy quoter would balloon
+  them to the whole table). Anything ambiguous falls through to the model.
+
 **isokit motion tokens are vendor-owned.** The FF audit flags `260ms`/`200ms`
 transitions inside figure SVGs and measured heights like `20px`/`44px`/`48px`
 — those are `react-isokit/styles.css` and SVG user units, not app code or
@@ -130,11 +157,14 @@ view never shows figures unasked.
 field is 280px of placeholder ("Ask away") — barely bigger than the text —
 and springs to 440px with a three-row textarea on focus (spring 400/25/1.5,
 the prompt-box shell this reverses-engineers), collapsing back once the draft
-is empty. Planner prompts are short; the field stays small because it is used
-small. The SEND ARROW is a state indicator, not a bloom: it rests hidden until
-there is something to send. It rides 160ms, a measured audit token matching
-the moderate tier's timescale. There is no field halo — it was tried and
-rejected.
+is empty. Collapsed it is one line with no footer and tightened padding
+(~79px tall): the send control is hidden on an empty draft anyway, so the row
+is dead height — but never while busy, because the footer carries Stop
+mid-stream. Planner prompts are short; the field stays small because it is
+used small. The SEND ARROW is a state indicator, not a bloom: it rests hidden
+until there is something to send. It rides 160ms, a measured audit token
+matching the moderate tier's timescale. There is no field halo — it was tried
+and rejected.
 
 **Verify UI changes against the staged runtime, never `next dev`.** `next dev`
 in this repo serves SSR HTML whose client chunks do not resolve, so the page

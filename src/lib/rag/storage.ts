@@ -567,6 +567,27 @@ export const getStoredChunksByIds = (ids: string[]): StoredChunk[] => {
     .sort((a, b) => (rank.get(a.id) ?? 0) - (rank.get(b.id) ?? 0));
 };
 
+/**
+ * Short text chunks on the given pages — legends, footnotes, titles. A table
+ * chunk is often unreadable without them: the EUSERC table's A/U/C/B column
+ * is defined by a one-line legend on the same page, and retrieval that
+ * returns the table without its legend hands the model a code it can only
+ * guess at.
+ */
+export const getShortTextChunksByPages = (pages: number[], maxChars = 400): StoredChunk[] => {
+  if (pages.length === 0) {
+    return [];
+  }
+  const db = getDb();
+  const placeholders = pages.map(() => "?").join(", ");
+  const rows = db
+    .prepare(
+      `SELECT * FROM chunks WHERE page IN (${placeholders}) AND chunk_type = 'text' AND length(text) <= ? ORDER BY page ASC, id ASC`
+    )
+    .all(...pages, maxChars) as Record<string, unknown>[];
+  return rows.map(toStoredChunk);
+};
+
 export const getAllChunks = (): StoredChunk[] => {
   const db = getDb();
   const rows = db.prepare("SELECT * FROM chunks ORDER BY page ASC, id ASC").all() as Record<

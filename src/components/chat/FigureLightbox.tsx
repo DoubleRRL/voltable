@@ -36,14 +36,21 @@ type ResizeState = {
  * A figure, full size, in a resizeable lightbox.
  *
  * A thumbnail in the answer is an invitation, not the content: on a live call
- * the planner has to read a dimension off the drawing, and a 120px thumbnail
+ * the planner has to read a dimension off the drawing, and a 112px thumbnail
  * cannot carry one. Clicking opens the full-resolution crop here.
+ *
+ * Deliberately chromeless: a title row and the drawing, nothing else. The
+ * OCR text and the chapter/page line used to live in a footer here, and they
+ * read as a second caption competing with the drawing — the caption is in the
+ * title, the page is on the thumbnail badge that opened this, and the OCR
+ * stays in the index where search uses it.
  *
  * The panel resizes by dragging its corner — the same "throw it bigger"
  * affordance a planner already uses on their Mac — and the image is
- * `object-contain` so a resize never crops a diagram. Everything rides the
- * system's spring tiers and surface tokens; the only custom motion is the
- * resize drag itself, which follows the pointer 1:1 and therefore must not be
+ * `object-contain` so a resize never crops a diagram. Clicking anywhere
+ * outside the panel closes it; so does Escape. Everything rides the system's
+ * spring tiers and surface tokens; the only custom motion is the resize drag
+ * itself, which follows the pointer 1:1 and therefore must not be
  * spring-smoothed.
  */
 export function FigureLightbox({
@@ -103,16 +110,13 @@ export function FigureLightbox({
     };
   }, [onClose]);
 
-  const ocr = figure.ocrText?.trim() ?? "";
-
   const content = (
-    <div className="fixed inset-0 z-50">
+    <div className="fixed inset-0 z-50" onClick={onClose}>
       <motion.div
         className="absolute inset-0 bg-black/40 dark:bg-black/80"
         initial={reduceMotion ? { opacity: 0 } : { opacity: 0 }}
         animate={{ opacity: 1 }}
         transition={reduceMotion ? { duration: 0.15, ease: "easeOut" } : spring.moderate}
-        onClick={onClose}
       />
       <div className="absolute inset-0 flex items-center justify-center p-4">
         <motion.div
@@ -123,6 +127,9 @@ export function FigureLightbox({
           initial={reduceMotion ? { opacity: 0, scale: 0.96 } : { opacity: 0, scale: 0.96 }}
           animate={{ opacity: 1, scale: 1 }}
           transition={reduceMotion ? { duration: 0.15, ease: "easeOut" } : spring.moderate}
+          // The centering wrapper covers the screen and would otherwise eat
+          // the click; the panel stops the close so only outside clicks land.
+          onClick={(event) => event.stopPropagation()}
           className={cn("relative flex flex-col overflow-hidden", surfaceClasses(3, 3), shape.container)}
           style={{ width: size.w, height: size.h }}
         >
@@ -157,20 +164,6 @@ export function FigureLightbox({
               alt={figure.caption || `ESR figure on page ${figure.page}`}
               className="h-full w-full object-contain"
             />
-          </div>
-
-          <div className={cn("flex shrink-0 flex-col gap-1.5 border-t border-[color:var(--border)] px-3 py-2")}>
-            {ocr ? (
-              <p className={cn(typeClass("micro"), "max-h-28 overflow-auto whitespace-pre-wrap text-muted-foreground")}>
-                {ocr}
-              </p>
-            ) : null}
-            <div className="flex items-center justify-between gap-2">
-              <span className={cn(typeClass("micro"), "text-muted-foreground")}>
-                {figure.chapter ? `${figure.chapter} · ` : ""}page {figure.page}
-              </span>
-              <span className={cn(typeClass("micro"), "text-muted-foreground")}>Drag the corner to resize</span>
-            </div>
           </div>
 
           <div

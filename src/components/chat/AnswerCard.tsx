@@ -14,6 +14,7 @@ import { spring } from "@/lib/springs";
 import { FigureCard } from "./FigureCard";
 import { EvidenceRail } from "./EvidenceRail";
 import { GroundingBadge } from "./GroundingBadge";
+import { Badge } from "@/components/ui/badge";
 import { NotCoveredNotice } from "./NotCoveredNotice";
 import type { SavedAnswer } from "./useSavedAnswers";
 import type { AssistantMessage, StoredException } from "./types";
@@ -185,7 +186,16 @@ export function AnswerCard({
       className={cn("gap-3 p-3", surfaceClasses(1, 2), shape.container)}
     >
       <div className="flex items-center justify-between gap-2">
-        <GroundingBadge grounding={message.grounding} />
+        {/* No verdict while streaming: the message starts life with no
+            evidence, and showing its default "Not in ESR" badge next to
+            "Writing…" reads as the answer before there is one. */}
+        {message.streaming ? (
+          <Badge variant="dot" color="gray" size="compact">
+            Checking…
+          </Badge>
+        ) : (
+          <GroundingBadge grounding={message.grounding} />
+        )}
         <div className="flex items-center gap-2">
           {message.streaming ? (
             <span className={cn(typeClass("caption"), "shimmer-text")}>

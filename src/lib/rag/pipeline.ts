@@ -753,6 +753,75 @@ const fallbackAnswer = (
   };
 };
 
+type TableVerdict = {
+  token: string;
+  code: string;
+  meaning: string;
+  rowText: string;
+  legendLine: string;
+  table: RetrievalChunk;
+  legend: RetrievalChunk;
+};
+
+/**
+ * Deterministic reading of a coded table cell, for questions that name the
+ * row key outright ("is 301A approved?"). A small model misreads long
+ * markdown tables — it attached row 1's `A` to `301A` while quoting the row
+ * that says `U` — so when the row and its legend are both in context, the
+ * lookup does not go through the model at all. Every guard errs toward not
+ * triggering: exactly one matching row, exactly one single-letter code cell
+ * in it, and a `CODE = meaning` legend line in context. Anything ambiguous
+ * falls through to the model.
+ */
+const resolveTableCode = (question: string, chunks: RetrievalChunk[]): TableVerdict | null => {
+  // Row keys look like 301A or 304: uppercase alphanumeric runs with at least
+  // one digit. Plain words (GAS, PANEL) are never row keys.
+  const tokens = [
+    ...new Set(question.toUpperCase().match(/\b[A-Z0-9]{3,}\b/g) ?? []),
+  ].filter((t) => /[0-9]/.test(t));
+  if (tokens.length === 0) return null;
+  type RowHit = { chunk: RetrievalChunk; rowText: string; code: string };
+  const hits: RowHit[] = [];
+  for (const token of tokens) {
+    const word = new RegExp(`\\b${token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`);
+    for (const chunk of chunks) {
+      if (!chunk.text.includes("|")) continue;
+      for (const line of chunk.text.split("\n")) {
+        if (!line.includes("|") || !word.test(line)) continue;
+        const codes = line
+          .split("|")
+          .map((c) => c.trim())
+          .filter((c) => /^[A-Z]$/.test(c));
+        if (codes.length !== 1) continue;
+        hits.push({ chunk, rowText: line.trim(), code: codes[0] as string });
+      }
+    }
+    if (hits.length === 1) break;
+    if (hits.length > 1) return null;
+  }
+  if (hits.length !== 1) return null;
+  const hit = hits[0] as RowHit;
+  const legendPattern = new RegExp(`(^|[\\s(])${hit.code}\\s*=\\s*([^;.\\n]+)`);
+  for (const chunk of chunks) {
+    const match = legendPattern.exec(chunk.text);
+    if (!match) continue;
+    const line = chunk.text
+      .split("\n")
+      .find((l) => l.includes(match[0].trim()));
+    if (!line) continue;
+    return {
+      token: tokens.find((t) => new RegExp(`\\b${t}\\b`).test(hit.rowText)) ?? tokens[0] as string,
+      code: hit.code,
+      meaning: match[2].trim(),
+      rowText: hit.rowText,
+      legendLine: line.trim(),
+      table: hit.chunk,
+      legend: chunk,
+    };
+  }
+  return null;
+};
+
 const answerPrompt = (
   question: string,
   chunks: RetrievalChunk[],
@@ -805,6 +874,7 @@ Rules:
 - Do not add unknown values.
 - Do not invent or list exceptions in the JSON. Exceptions are attached separately from storage.
 - When the question mentions orientation or location (front, rear, side, line side, load side, working space, radial, "in front of"), the answer and directAnswer MUST reflect that same orientation. Do not substitute a clearance that applies to a different face (e.g. rear/radial vs front/working space) unless the chunks only address one.
+- When a table cell is a code or single letter (e.g. A, U, C, B), interpret it ONLY through a legend or definition chunk in the context ("U = Unacceptable"). Never expand a code from prior knowledge or from the column heading alone. If no legend is present in the chunks, say the code's meaning is not stated in the retrieved passages instead of guessing.
 - Keep answer concise: exactly one short paragraph in answer; one-sentence directAnswer (roughly <= 36 words when needed for units like feet and inches).
 - If confidence is weak return a brief caveat inside answer.
 `;
@@ -1181,6 +1251,78 @@ const answerCore = async (
     quoteSet.map((c) => c.id),
     provisionalCitations
   );
+
+  // A coded table cell the question names outright never goes to the model:
+  // the model misreads long markdown tables (it attached row 1's `A` to
+  // `301A` while quoting the row that says `U`), and the row plus its legend
+  // is a complete answer on its own. Skips the ~7s model call as well.
+  const tableVerdict = resolveTableCode(question, quoteSet.slice(0, MAX_PROMPT_CHUNKS));
+  if (tableVerdict) {
+    // Verbatim spans, not resolveQuote: the row and the legend line were
+    // lifted character-for-character from their chunks, so indexOf is exact
+    // and the quote stays one row / one line instead of ballooning to the
+    // whole table (which is what the fuzzy quoter produces here).
+    const exactCitation = (text: string, chunk: RetrievalChunk): SourceCitation | null => {
+      const start = chunk.text.indexOf(text);
+      if (start < 0 || text.length < 8) return null;
+      return {
+        page: chunk.page,
+        quote: text,
+        section: chunk.section ?? null,
+        chapter: chunk.chapter ?? null,
+        pageLabel: String(chunk.page),
+        sourceLink: `${getAppConfig().ESR_SOURCE_LINK_PREFIX}${chunk.page}`,
+        quoteStart: start,
+        quoteEnd: start + text.length,
+      };
+    };
+    const rowCitation = exactCitation(tableVerdict.rowText, tableVerdict.table);
+    const legendCitation = exactCitation(tableVerdict.legendLine, tableVerdict.legend);
+    const tableCitations = [rowCitation, legendCitation].filter(
+      (c): c is SourceCitation => c !== null,
+    );
+    if (tableCitations.length === 2) {
+      const section = tableVerdict.table.section ?? "the ESR";
+      const tableAnswer = `${tableVerdict.token} is marked ${tableVerdict.code} (${tableVerdict.meaning}) in ${section}.`;
+      let tableFigures = fallbackFigureEvidence(quoteSet, allFigures);
+      if (visualFirst && quoteSet.length > 0) {
+        const fallbackPages = [...new Set(quoteSet.map((c) => c.page))];
+        tableFigures = mergeFigureLists(
+          tableFigures,
+          getFigureEvidenceForPages(fallbackPages),
+        );
+      }
+      tableFigures = finalizeFigures(tableFigures, quoteSet);
+      const tableResponse: ChatAnswer = {
+        answer: tableAnswer,
+        directAnswer: `${tableVerdict.token} is ${tableVerdict.code} (${tableVerdict.meaning}).`,
+        citations: tableCitations,
+        figures: tableFigures,
+        exceptions: storedExceptions,
+        grounding: "esr",
+        notCovered: false,
+        retrievalSummary: retrievalSummaryFor(
+          candidates.length,
+          summary,
+          chapters,
+          retrievalLatencyMs,
+        ),
+      };
+      saveCacheEntry(
+        question,
+        tableResponse,
+        config.EMBEDDING_CACHE_TTL_SECONDS,
+        visualFirst,
+        conversationPrefix,
+        extractive,
+      );
+      if (sink) {
+        await emit({ kind: "write", source: "extractive" });
+        await emit({ kind: "text", delta: tableResponse.answer });
+      }
+      return { answer: tableResponse, usage: null };
+    }
+  }
 
   const prompt = answerPrompt(
     question,

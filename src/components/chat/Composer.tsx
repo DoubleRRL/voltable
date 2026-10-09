@@ -78,10 +78,14 @@ export function Composer({
     // keeps the field open so the planner can keep typing.
     if (!value.trim()) setFocused(false);
   };
+  // The resting pill is one line with no footer: the send control is hidden
+  // while the draft is empty anyway, so the whole row is dead height. Never
+  // collapse while busy — the footer carries the Stop control mid-stream.
+  const collapsed = !focused && !value.trim() && !busy;
 
   // The inner height is content-driven (minRows), so measuring it never feeds
-  // back into the shell animation. The card's own padding is read once it is
-  // laid out and added on top, which keeps this correct for both card variants.
+  // back into the shell animation. The card's own padding is read whenever the
+  // collapsed state changes, because the pill uses tighter padding.
   useEffect(() => {
     const inner = innerRef.current;
     if (inner) {
@@ -95,12 +99,12 @@ export function Composer({
       const cs = getComputedStyle(card);
       setPad(parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom));
     }
-  }, []);
+  }, [collapsed]);
 
   return (
     <motion.div
       ref={cardRef}
-      className={cn("composer-field", fieldClassName)}
+      className={cn("composer-field", collapsed && "composer-collapsed", fieldClassName)}
       initial={false}
       animate={{
         height: Math.round(innerH + pad),
@@ -113,7 +117,12 @@ export function Composer({
       transition={SHELL}
       style={{ overflow: "hidden" }}
     >
-      <div ref={innerRef} className="composer-bloom p-1" data-draft={value.trim() ? "true" : "false"}>
+      <div
+        ref={innerRef}
+        className="composer-bloom p-1"
+        data-draft={value.trim() ? "true" : "false"}
+        data-collapsed={collapsed ? "true" : "false"}
+      >
         {children}
         <InputMessage
           className={cn("w-full", className)}
