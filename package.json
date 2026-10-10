@@ -17,7 +17,9 @@
     "lint": "eslint src scripts",
     "typecheck": "tsc --noEmit",
     "build:evidence": ".venv-mineru/bin/python scripts/render/evidence.py build",
-    "plan:evidence": ".venv-mineru/bin/python scripts/render/evidence.py plan"
+    "plan:evidence": ".venv-mineru/bin/python scripts/render/evidence.py plan",
+    "audit:citations": ".venv-mineru/bin/python scripts/audit-citations.py",
+    "audit:visuals": ".venv-mineru/bin/python scripts/audit-visuals.py"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",

@@ -269,6 +269,16 @@ render cache, evidence paths, citation links. The render cache is the dangerous
 one — a shared `p${page}.json` would silently serve ESR's page 73 OCR for DOH
 page 73, which is wrong data rather than a visible failure.
 
+**Audit the citations, not just the answers.** `npm run audit:citations` walks
+every catalogued asset and checks the crop exists on disk, the manual carries a
+citable identity, and the link is the evidence route. Retrieval can be perfect
+and an answer still be uncheckable if the crop or the label is missing, and
+checking only the questions asked today would not find it.
+
+Pages with no footer identity at all — front matter, dividers, blanks — are
+counted and reported, not failed. Failing them would push someone to invent
+labels for pages that do not have one.
+
 **Page identity is read off the printed footer, not inferred.** Every manual is
 one FrameMaker template, so `scripts/render/page-facts.py` reads the header and
 footer bands by text-matrix position. It has to be positional: `extract_text()`
@@ -277,6 +287,10 @@ printed page label is then the dash-pair fragment nearest the literal `PAGE`
 token, not the first dash-pair in the band — ESR section titles end in a
 voltage, so "Underground Service Connections 0-600 V" otherwise reads as a page
 label.
+
+**UGS standards carry a trailing letter.** `SS 540`, `CD 132`, `MC 830` and
+also `FC 623P`, `FC 700P`. A word boundary after the digits matches none of the
+second shape, which left those pages with no standard and therefore no citation.
 
 **The manuals are not in the app.** 212 MB of PDF against a code bundle of
 tens of megabytes, and the extracted ADS/DOH copies are subsets whose page

@@ -51,8 +51,11 @@ DATE_RE = re.compile(r"\b(\d{1,2}[-/]\d{1,2}[-/]\d{4})\b")
 # out of extract_text() in arbitrary order, so adjacency is not available.
 PAGE_LABEL_RE = re.compile(r"\b(\d{1,4}\s*[-–—]\s*\d{1,4})\b")
 CHAPTER_RE = re.compile(r"\b(ESR|ADS|PLM)[-–—]\s*(\d+)\b")
-# Standard numbers look like "AC 120", "CD 132", "SS564", "MC830".
-STANDARD_RE = re.compile(r"\b([A-Z]{2,4}\s?\d{2,4})\b")
+# Standard numbers look like "AC 120", "CD 132", "SS564", "MC830" — and some
+# carry a trailing letter: "FC 623P", "FC 700P" in UGS. A hard word boundary
+# after the digits matched nothing there, so those pages lost their standard
+# entirely and could not be cited.
+STANDARD_RE = re.compile(r"\b([A-Z]{2,3}\s?\d{2,4}[A-Z]?)\b")
 SHEET_RE = re.compile(r"\b(\d{1,4})\s*of\s*(\d{1,4})\b", re.IGNORECASE)
 
 
