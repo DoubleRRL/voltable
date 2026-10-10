@@ -7,6 +7,7 @@ import { surfaceClasses } from "@/lib/surface-classes";
 import { typeClass } from "@/lib/type-scale";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { ThinkingIndicator } from "@/components/ui/thinking-indicator";
 import { Collapsible } from "@base-ui/react/collapsible";
 import { motion } from "framer-motion";
 
@@ -14,7 +15,6 @@ import { spring } from "@/lib/springs";
 import { FigureCard } from "./FigureCard";
 import { EvidenceRail } from "./EvidenceRail";
 import { GroundingBadge } from "./GroundingBadge";
-import { Badge } from "@/components/ui/badge";
 import { NotCoveredNotice } from "./NotCoveredNotice";
 import type { SavedAnswer } from "./useSavedAnswers";
 import type { AssistantMessage, StoredException } from "./types";
@@ -186,22 +186,17 @@ export function AnswerCard({
       className={cn("gap-3 p-3", surfaceClasses(1, 2), shape.container)}
     >
       <div className="flex items-center justify-between gap-2">
-        {/* No verdict while streaming: the message starts life with no
-            evidence, and showing its default "Not in ESR" badge next to
-            "Writing…" reads as the answer before there is one. */}
+        {/* While streaming there is no verdict and no prose yet — just the
+            orb. Text statuses ("Checking…", "Writing…") narrated the plumbing
+            instead of the state; the indicator announces one "Thinking…" to
+            assistive tech and shows the morphing glyph to everyone else. */}
         {message.streaming ? (
-          <Badge variant="dot" color="gray" size="compact">
-            Checking…
-          </Badge>
+          <ThinkingIndicator size="compact" className="px-0 py-0" />
         ) : (
           <GroundingBadge grounding={message.grounding} />
         )}
         <div className="flex items-center gap-2">
-          {message.streaming ? (
-            <span className={cn(typeClass("caption"), "shimmer-text")}>
-              Writing…
-            </span>
-          ) : onSave ? (
+          {!message.streaming && onSave ? (
             <Button
               size="compact"
               variant="tertiary"

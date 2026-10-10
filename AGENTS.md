@@ -63,9 +63,10 @@ The `TabsSubtle` idea died with the header bar.
 and prose come first, then the figure thumbnails, then a "Sources" section
 with the citations — the shape every modern answer UI converged on. The
 retrieval trail ("How this was found") used to sit above the answer and read
-as a second answer competing with the first, so it   is gone: while streaming
-the badge area says "Writing…", and once settled each figure and citation sits
-under the answer it belongs to. There is no right-hand rail; the conversation
+as a second answer competing with the first, so it is gone: while streaming
+the card shows the thinking orb (morphing circle⇄infinity, one "Thinking…"
+announcement, static under reduced motion), and once settled each figure and
+citation sits under the answer it belongs to. There is no right-hand rail; the conversation
 is a single `max-w-3xl` column so an evidence column can never squeeze the
 answer or orphan the citations from their turn. Refusal copy is
 planner-facing only: the notice once read "Don't quote a number from this",
@@ -102,6 +103,13 @@ knowledge, then misread the row on top of it (it attached row 1's `A` to
   exactly one row plus its legend are in context: no ~7s model call, and the
   row and legend line are quoted verbatim (the fuzzy quoter would balloon
   them to the whole table). Anything ambiguous falls through to the model.
+- Retrieval queries resolve anaphora: pronouns (`it/they/them/…`) are never
+  self-contained, so an anaphoric follow-up ("what kind of panels need it
+  then?") searches the tail conversation (last user turns plus the last
+  assistant answer, where the referent lives) instead of searching the
+  dangling words literally — which once answered test blocks with handles.
+  Bare-relative-pronoun "that" is excluded on purpose (it false-triggers on
+  self-contained questions); short questions merge regardless.
 - Every measurement in a model answer must appear in a cited quote — same
   number, same unit, no cross-unit conversion (a "2.5 feet" backed only by a
   "30 in" riser dimension is fabrication, not support). Word-numbers count

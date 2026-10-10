@@ -74,15 +74,31 @@ const MAX_DIRECT_ANSWER_WORDS = 32;
 
 const sanitize = (value: string) => value.replace(/\s+/g, " ").trim();
 
+/**
+ * Personal pronouns are never self-contained: "it" in "what kind of panels
+ * need it then?" means whatever the previous turn established, and searching
+ * it literally retrieves whatever matches the dangling words (here, handles
+ * on hinged panels instead of test bypass blocks). Demonstratives
+ * (this/that/those) are left out deliberately — relative-pronoun "that" in
+ * "the rule that governs panels" would false-trigger on self-contained
+ * questions, and genuinely demonstrative questions are short enough for the
+ * word rule below.
+ */
+const ANAPHORA = /\b(it|they|them|he|she|him|her|its|their|theirs)\b/i;
+
 const buildRetrievalQuery = (question: string, conversationPrefix: string): string => {
   const words = question.trim().split(/\s+/).filter(Boolean);
-  if (words.length >= 6 || !conversationPrefix.trim()) {
+  const prefix = conversationPrefix.trim();
+  if (!prefix || (words.length >= 6 && !ANAPHORA.test(question))) {
     return question;
   }
-  const userLines = [...conversationPrefix.matchAll(/^User:\s*(.+)$/gim)].map((m) =>
+  // Resolve against the tail: the last user turn plus the last assistant
+  // answer, which is where the referent ("test bypass blocks") lives. User
+  // lines alone are not enough — the answer often holds the entity.
+  const lines = [...prefix.matchAll(/^(?:User|Assistant):\s*(.+)$/gim)].map((m) =>
     m[1].trim()
   );
-  const tail = userLines.slice(-2).join(" ");
+  const tail = lines.slice(-3).join(" ");
   const merged = `${tail} ${question}`.trim();
   return merged.slice(0, 1200);
 };

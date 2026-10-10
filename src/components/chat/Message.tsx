@@ -22,7 +22,7 @@ type MessageProps = {
  *
  * The retrieval trail used to sit above the answer under a "How this was
  * found" header. It read as a second answer competing with the first, so it
- * is gone: while streaming the badge area says "Writing…", and once settled
+ * is gone: while streaming the card shows the thinking orb, and once settled
  * the answer carries its evidence (thumbnails, then sources) underneath.
  *
  * The transcript keys this component by message id, so the expanded state
