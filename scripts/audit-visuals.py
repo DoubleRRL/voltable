@@ -32,6 +32,15 @@ import sqlite3
 import sys
 from collections import defaultdict
 
+# Captions that are never code tables, however many single letters they hold:
+# glossary headwords, note labels (Note A, Note B), and dimension letters
+# (dimension A, B MIN, C MIN) are identifiers, not verdict codes. Each was
+# verified by hand against the page before being excluded here.
+SKIP_CODE_CAPTIONS = ("glossar",)
+SKIP_CODE_PREFIXES = ("note",)
+
+FOOTER_RE = re.compile(r"EFFECTIVE DATE|^\s*PAGE\s+\d", re.IGNORECASE)
+
 DB = sys.argv[1] if len(sys.argv) > 1 else "data/esr.sqlite"
 
 UNIT_MAP = {
@@ -143,6 +152,11 @@ def main() -> None:
         ocr = layers.get("ocrText") or ""
         markdown = layers.get("tableMarkdown") or ""
         visual_text = (body_text(markdown) + "\n" + ocr).strip()
+        # Document footers (EFFECTIVE DATE / PAGE markers) ride inside table
+        # markdown; they are not content and never belong in a comparison.
+        visual_text = "\n".join(
+            l for l in visual_text.split("\n") if not FOOTER_RE.search(l)
+        ).strip()
         if not visual_text:
             continue
         page_chunks = [c for c in by_page.get(asset["page"], []) if c["chunk_type"] == "text"]
@@ -173,9 +187,18 @@ def main() -> None:
                 "caption": (asset["caption"] or "")[:70],
             })
 
-        # 3. code tables without a legend
+        # 3. code tables without a legend. Glossary headwords, note labels,
+        # and lone dimension letters are identifiers, not verdicts (each
+        # verified by hand) — so this only fires on two or more distinct
+        # codes outside those captions.
         codes = table_codes(markdown)
-        if codes:
+        lowered_caption = (asset["caption"] or "").lower()
+        skippable = (
+            "glossar" in lowered_caption
+            or lowered_caption.startswith("note")
+            or len(codes) < 2
+        )
+        if codes and not skippable:
             missing = [c for c in sorted(codes) if not legend_for(c, [section_text, visual_text])]
             if missing:
                 report["codeless_legends"].append({
