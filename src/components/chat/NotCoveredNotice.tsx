@@ -17,7 +17,7 @@ type NotCoveredNoticeProps = {
  * The ESR does not cover this.
  *
  * One sentence and the nearest chapters, and nothing else — every word here
- * is planner-facing. The grounding badge already says "Not in the ESR", so
+ * is planner-facing. The grounding badge already says "Not in manuals", so
  * this must not restate it, and it must never carry instructions meant for
  * the model ("don't quote a number" is the software's business, not the
  * planner's). What remains is what they actually need: nothing matched, and
@@ -43,7 +43,7 @@ export function NotCoveredNotice({
         style={{ fontVariationSettings: fontWeights.normal }}
       >
         {fromRetrieval
-          ? "Nothing in the manual matched."
+          ? "Nothing in the manuals matched."
           : "No passage came back to check this against, so treat it as unverified."}
       </p>
       {chapters.length > 0 ? (

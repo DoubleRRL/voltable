@@ -92,7 +92,7 @@ const parseBbox = (raw: string | null): [number, number, number, number] | null 
 
 const toStoredChunk = (row: Record<string, unknown>): StoredChunk => ({
   id: String(row.id),
-  docId: String(row.doc_id),
+  docId: String(row.doc_id) as StoredChunk["docId"],
   page: Number(row.page),
   chunkType: String(row.chunk_type) as StoredChunk["chunkType"],
   evidenceType: String(row.evidence_type) as StoredChunk["evidenceType"],
@@ -101,6 +101,9 @@ const toStoredChunk = (row: Record<string, unknown>): StoredChunk => ({
   sectionKey: row.section_key ? String(row.section_key) : null,
   chapter: row.chapter ? String(row.chapter) : null,
   pageLabel: row.page_label ? String(row.page_label) : null,
+  standard: row.standard ? String(row.standard) : null,
+  sheetOf: row.sheet_of == null ? null : Number(row.sheet_of),
+  sheetCount: row.sheet_count == null ? null : Number(row.sheet_count),
   sourceLink: String(row.source_link),
   visualPath: row.visual_path ? String(row.visual_path) : null,
   embedding: parseEmbedding(String(row.embedding_json)),
@@ -151,9 +154,14 @@ const cleanStoredExceptions = (items: StoredException[]): StoredException[] =>
 
 const toVisualAsset = (row: Record<string, unknown>): VisualAsset => ({
   id: String(row.id),
+  docId: (row.doc_id ? String(row.doc_id) : "esr") as VisualAsset["docId"],
   page: Number(row.page),
   kind: String(row.kind) as VisualAsset["kind"],
   chapter: row.chapter ? String(row.chapter) : null,
+  standard: row.standard ? String(row.standard) : null,
+  pageLabel: row.page_label ? String(row.page_label) : null,
+  sheetOf: row.sheet_of == null ? null : Number(row.sheet_of),
+  sheetCount: row.sheet_count == null ? null : Number(row.sheet_count),
   sectionKey: row.section_key ? String(row.section_key) : null,
   sectionPath: row.section_path ? String(row.section_path) : null,
   caption: String(row.caption ?? ""),
@@ -194,15 +202,23 @@ const migrateChunksSchema = (db: Db) => {
   addColumn("pair_group_id", "TEXT");
   addColumn("section_key", "TEXT");
   addColumn("chapter", "TEXT");
+  addColumn("standard", "TEXT");
+  addColumn("sheet_of", "INTEGER");
+  addColumn("sheet_count", "INTEGER");
 };
 
 const ensureVisualAssetsTable = (db: Db) => {
   db.exec(`
     CREATE TABLE IF NOT EXISTS visual_assets (
       id TEXT PRIMARY KEY,
+      doc_id TEXT NOT NULL DEFAULT 'esr',
       page INTEGER NOT NULL,
       kind TEXT NOT NULL,
       chapter TEXT,
+      standard TEXT,
+      page_label TEXT,
+      sheet_of INTEGER,
+      sheet_count INTEGER,
       section_key TEXT,
       section_path TEXT,
       caption TEXT NOT NULL DEFAULT '',
@@ -228,6 +244,11 @@ const ensureVisualAssetsTable = (db: Db) => {
     ["chapter", "TEXT"],
     ["figure_url", "TEXT"],
     ["bbox_json", "TEXT"],
+    ["standard", "TEXT"],
+    ["page_label", "TEXT"],
+    ["sheet_of", "INTEGER"],
+    ["sheet_count", "INTEGER"],
+    ["doc_id", "TEXT NOT NULL DEFAULT 'esr'"],
   ] as const) {
     if (!have.has(name)) {
       db.exec(`ALTER TABLE visual_assets ADD COLUMN ${name} ${def}`);
@@ -252,7 +273,7 @@ const getDbPath = () => {
   // runtime resolve. Without it the traced path is unknown at build time, the
   // output-file trace pulls in the whole project, and the build warns that the
   // trace was unintentionally wide.
-  return path.resolve(/* turbopackIgnore: true */ process.cwd(), config.ESR_DB_PATH);
+  return path.resolve(/* turbopackIgnore: true */ process.cwd(), config.MANUALS_DB_PATH);
 };
 
 export const getDb = () => {
@@ -344,10 +365,12 @@ export const upsertChunks = (chunks: StoredChunk[]) => {
   const insert = db.prepare(`
     INSERT OR REPLACE INTO chunks (
       id, doc_id, page, chunk_type, evidence_type, text, section, section_key, page_label,
+      standard, sheet_of, sheet_count,
       source_link, visual_path, embedding_json, created_at,
       chunk_role, visual_kind, paired_chunk_ids, pair_group_id, chapter
     ) VALUES (
       @id, @docId, @page, @chunkType, @evidenceType, @text, @section, @sectionKey, @pageLabel,
+      @standard, @sheetOf, @sheetCount,
       @sourceLink, @visualPath, @embeddingJson, @createdAt,
       @chunkRole, @visualKind, @pairedChunkIds, @pairGroupId, @chapter
     )
@@ -364,7 +387,10 @@ export const upsertChunks = (chunks: StoredChunk[]) => {
         text: chunk.text,
         section: chunk.section,
         sectionKey: chunk.sectionKey ?? null,
-        pageLabel: chunk.pageLabel,
+        pageLabel: chunk.pageLabel ?? null,
+        standard: chunk.standard ?? null,
+        sheetOf: chunk.sheetOf ?? null,
+        sheetCount: chunk.sheetCount ?? null,
         sourceLink: chunk.sourceLink,
         visualPath: chunk.visualPath,
         embeddingJson: createEmbeddingPayload(chunk.embedding),
@@ -386,11 +412,13 @@ export const upsertVisualAssets = (assets: VisualAsset[]) => {
   const db = getDb();
   const insert = db.prepare(`
     INSERT OR REPLACE INTO visual_assets (
-      id, page, kind, chapter, section_key, section_path, caption,
+      id, doc_id, page, kind, chapter, standard, page_label, sheet_of, sheet_count,
+      section_key, section_path, caption,
       figure_url, thumbnail_url, bbox_json, source_link,
       pair_group_id, exceptions_json, supporting_chunk_ids_json, text_layers_json, created_at
     ) VALUES (
-      @id, @page, @kind, @chapter, @sectionKey, @sectionPath, @caption,
+      @id, @docId, @page, @kind, @chapter, @standard, @pageLabel, @sheetOf, @sheetCount,
+      @sectionKey, @sectionPath, @caption,
       @figureUrl, @thumbnailUrl, @bboxJson, @sourceLink,
       @pairGroupId, @exceptionsJson, @supportingChunkIdsJson, @textLayersJson, @createdAt
     )
@@ -400,9 +428,14 @@ export const upsertVisualAssets = (assets: VisualAsset[]) => {
     for (const asset of records) {
       insert.run({
         id: asset.id,
+        docId: asset.docId,
         page: asset.page,
         kind: asset.kind,
         chapter: asset.chapter ?? null,
+        standard: asset.standard ?? null,
+        pageLabel: asset.pageLabel ?? null,
+        sheetOf: asset.sheetOf ?? null,
+        sheetCount: asset.sheetCount ?? null,
         sectionKey: asset.sectionKey ?? null,
         sectionPath: asset.sectionPath ?? null,
         caption: asset.caption ?? "",
@@ -424,8 +457,10 @@ export const upsertVisualAssets = (assets: VisualAsset[]) => {
 
 export const getVisualAssets = (): VisualAsset[] => {
   const db = getDb();
+  // Manual first, then page: with five manuals loaded, page 73 exists in all
+  // of them and a page-ordered list interleaves unrelated drawings.
   const rows = db
-    .prepare("SELECT * FROM visual_assets ORDER BY page ASC, id ASC")
+    .prepare("SELECT * FROM visual_assets ORDER BY doc_id ASC, page ASC, id ASC")
     .all() as Record<string, unknown>[];
   return rows.map(toVisualAsset);
 };
@@ -512,7 +547,11 @@ export type ChunkLight = {
   text: string;
   section: string | null;
   sectionKey: string | null;
+  chapter: string | null;
   pageLabel: string | null;
+  standard: string | null;
+  sheetOf: number | null;
+  sheetCount: number | null;
   sourceLink: string;
   visualPath: string | null;
   createdAt: number;
@@ -530,7 +569,11 @@ const toChunkLight = (row: Record<string, unknown>): ChunkLight => ({
   text: String(row.text),
   section: row.section ? String(row.section) : null,
   sectionKey: row.section_key ? String(row.section_key) : null,
+  chapter: row.chapter ? String(row.chapter) : null,
   pageLabel: row.page_label ? String(row.page_label) : null,
+  standard: row.standard ? String(row.standard) : null,
+  sheetOf: row.sheet_of == null ? null : Number(row.sheet_of),
+  sheetCount: row.sheet_count == null ? null : Number(row.sheet_count),
   sourceLink: String(row.source_link),
   visualPath: row.visual_path ? String(row.visual_path) : null,
   createdAt: Number(row.created_at),
@@ -545,8 +588,9 @@ export const getAllChunksLight = (): ChunkLight[] => {
   const rows = db
     .prepare(
       `SELECT id, doc_id, page, chunk_type, evidence_type, text, section, section_key, page_label,
+        standard, sheet_of, sheet_count, chapter,
         source_link, visual_path, created_at, chunk_role, paired_chunk_ids, pair_group_id
-        FROM chunks ORDER BY page ASC, id ASC`
+        FROM chunks ORDER BY doc_id ASC, page ASC, id ASC`
     )
     .all() as Record<string, unknown>[];
   return rows.map(toChunkLight);
@@ -589,28 +633,59 @@ export const getChunksByPairGroup = (pairGroupId: string): StoredChunk[] => {
  * is defined by a one-line legend on the same page, and retrieval that
  * returns the table without its legend hands the model a code it can only
  * guess at.
+ *
+ * Scoped by manual as well as page. Every manual has a page 20, and an ESR
+ * legend attached to a DOH table is worse than no legend: it is a confident
+ * wrong key for a code the reader then expands.
  */
-export const getShortTextChunksByPages = (pages: number[], maxChars = 400): StoredChunk[] => {
-  if (pages.length === 0) {
+export const getShortTextChunksByPages = (
+  locations: Array<{ docId: string; page: number }>,
+  maxChars = 400
+): StoredChunk[] => {
+  if (locations.length === 0) {
     return [];
   }
   const db = getDb();
-  const placeholders = pages.map(() => "?").join(", ");
+  const clauses = locations.map(() => "(doc_id = ? AND page = ?)");
+  const params = locations.flatMap((l) => [l.docId, l.page]);
   const rows = db
     .prepare(
-      `SELECT * FROM chunks WHERE page IN (${placeholders}) AND chunk_type = 'text' AND length(text) <= ? ORDER BY page ASC, id ASC`
+      `SELECT * FROM chunks WHERE (${clauses.join(" OR ")}) AND chunk_type = 'text'
+        AND length(text) <= ? ORDER BY doc_id ASC, page ASC, id ASC`
     )
-    .all(...pages, maxChars) as Record<string, unknown>[];
+    .all(...params, maxChars) as Record<string, unknown>[];
   return rows.map(toStoredChunk);
 };
 
 export const getAllChunks = (): StoredChunk[] => {
   const db = getDb();
-  const rows = db.prepare("SELECT * FROM chunks ORDER BY page ASC, id ASC").all() as Record<
-    string,
-    unknown
-  >[];
+  const rows = db
+    .prepare("SELECT * FROM chunks ORDER BY doc_id ASC, page ASC, id ASC")
+    .all() as Record<string, unknown>[];
   return rows.map(toStoredChunk);
+};
+
+/**
+ * Drop everything belonging to one manual, leaving the others indexed.
+ *
+ * Re-ingesting a manual has to replace it rather than merge into it, and it
+ * must not take the other four manuals down with it. Every generated id is
+ * namespaced by manual id, so deleting one manual's rows cannot orphan
+ * another manual's evidence.
+ */
+export const clearManual = (docId: string) => {
+  const db = getDb();
+  const tx = db.transaction(() => {
+    const rows = db.prepare("SELECT id FROM chunks WHERE doc_id = ?").all(docId) as {
+      id: string;
+    }[];
+    for (const { id } of rows) {
+      db.prepare("DELETE FROM chunks_fts WHERE chunk_id = ?").run(id);
+    }
+    db.prepare("DELETE FROM chunks WHERE doc_id = ?").run(docId);
+    db.prepare("DELETE FROM visual_assets WHERE doc_id = ?").run(docId);
+  });
+  tx();
 };
 
 export type SuggestHit = {
@@ -784,27 +859,48 @@ export const getAllPageFigures = (): FigureEvidence[] =>
       asset,
       figure: {
         id: asset.id,
+        docId: asset.docId,
         page: asset.page,
+        pageLabel: asset.pageLabel,
+        standard: asset.standard,
+        sheetOf: asset.sheetOf,
+        sheetCount: asset.sheetCount,
         caption: figureCaption(asset),
         sourceLink: asset.sourceLink,
         chapter: asset.chapter,
         // The crop is the point of the app; the full page render stays as the
         // fallback for a catalogued asset whose crop was never written.
         figureUrl:
-          asset.figureUrl ?? asset.thumbnailUrl ?? `/figures/page-${asset.page}.png`,
+          asset.figureUrl ??
+          asset.thumbnailUrl ??
+          `/evidence/${asset.docId}/page-${asset.page}.png`,
         ocrText: asset.textLayers.ocr?.trim() || null,
       } satisfies FigureEvidence,
     }))
     .sort(
       (a, b) =>
+        a.figure.docId.localeCompare(b.figure.docId) ||
         a.figure.page - b.figure.page ||
         figureKindRank(a.asset.kind) - figureKindRank(b.asset.kind) ||
         a.figure.id.localeCompare(b.figure.id)
     )
     .map((entry) => entry.figure);
 
-export const getFigureEvidenceForPages = (pages: number[]): FigureEvidence[] => {
-  const want = new Set(pages.filter((p) => Number.isFinite(p)));
+/**
+ * Figures on specific pages of specific manuals.
+ *
+ * Scoped by manual because page 20 exists in all five: a bare page number
+ * would answer a DOH question with an ESR drawing, which reads as a confident
+ * answer rather than as a retrieval mistake.
+ */
+export const getFigureEvidenceForPages = (
+  locations: Array<{ docId: string; page: number }>
+): FigureEvidence[] => {
+  const want = new Set(
+    locations
+      .filter((l) => Number.isFinite(l.page))
+      .map((l) => `${l.docId}:${l.page}`)
+  );
   if (want.size === 0) {
     return [];
   }
@@ -812,7 +908,7 @@ export const getFigureEvidenceForPages = (pages: number[]): FigureEvidence[] => 
   const out: FigureEvidence[] = [];
   const seen = new Set<string>();
   for (const fig of all) {
-    if (want.has(fig.page) && !seen.has(fig.id)) {
+    if (want.has(`${fig.docId}:${fig.page}`) && !seen.has(fig.id)) {
       out.push(fig);
       seen.add(fig.id);
     }

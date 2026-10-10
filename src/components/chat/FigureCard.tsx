@@ -8,6 +8,7 @@ import { cn } from "@/lib/utils";
 import { useShape } from "@/lib/shape-context";
 import { typeClass } from "@/lib/type-scale";
 import { spring } from "@/lib/springs";
+import { MANUALS } from "@/lib/rag/docs";
 
 import type { FigureEvidence } from "./types";
 import { FigureLightbox } from "./FigureLightbox";
@@ -46,7 +47,9 @@ export function FigureCard({ figure, className }: FigureCardProps) {
     return null;
   }
 
-  const alt = figure.caption?.trim() || `ESR figure on page ${figure.page}`;
+  const alt =
+    figure.caption?.trim() ||
+    `${MANUALS[figure.docId].code} figure on page ${figure.page}`;
 
   return (
     <>

@@ -27,7 +27,7 @@ export type EvalItem = {
   expectNotCovered?: true;
   /** Which extractor produced the item, so a bad item can be traced back. */
   pattern: string;
-  /** Asset or chunk id in esr.sqlite, for triage. */
+  /** Asset or chunk id in manuals.sqlite, for triage. */
   sourceId: string;
 };
 

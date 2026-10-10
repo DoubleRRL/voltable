@@ -22,10 +22,11 @@ const SW_FIELD = field([PLINTH, SEC1, SEC2, SEC3, ROOF, HANDLE]);
 /**
  * Indoor 1200A metal-clad lineup: three shallow equipment sections sharing
  * one plinth under a common bus-duct roof, each section fronted by double
- * doors with paired handles and louver bands top and bottom, an instrument
- * window and the amps screen on the left section, and breaker position lamps
- * on the middle one. Pressing flashes the main breaker operating handle; the
- * flash is the whole output.
+ * doors with paired handles and louver bands top and bottom, a round meter
+ * socket with its readout on the instrument-transformer compartment door of the
+ * left section, and breaker position lamps on the middle one. Socket and
+ * readout follow ESR Figure 6-1. Pressing flashes the main breaker operating
+ * handle; the flash is the whole output.
  */
 export function SwitchgearFigure({ transition }: { transition?: Transition }) {
   const [pulses, setPulses] = useState(0);
@@ -55,17 +56,25 @@ export function SwitchgearFigure({ transition }: { transition?: Transition }) {
         r={5}
         front={
           <>
-            <rect
-              className="ik-screen"
-              x={8}
-              y={8}
-              width={30}
-              height={18}
-              rx={2}
+            {/* Meter socket, drawn round because a socket is round. ESR Figure 6-1
+                shows the round ANSI form-locking socket on the instrument-
+                transformer compartment door, with the rectangular readout beside
+                it; a rectangular screen where the socket belongs reads as a panel
+                with no meter in it. */}
+            <circle className="ik-detail" cx={13} cy={17} r={8.5} />
+            <circle className="ik-detail" cx={13} cy={17} r={6} />
+            <path
+              className="ik-detail"
+              d="M13 11v3 M13 20v3 M7 17h3 M16 17h3"
             />
-            <text className="ik-screen-text" x={11} y={21} fontSize={8}>
-              1200A
-            </text>
+            <rect
+              className="ik-detail"
+              x={25}
+              y={11}
+              width={15}
+              height={11}
+              rx={1.5}
+            />
             <path className="ik-detail" d="M23 30V112" />
             <rect
               className="ik-detail"

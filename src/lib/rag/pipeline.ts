@@ -17,6 +17,8 @@ import type {
   StoredException,
 } from "@/lib/rag/types";
 import { retrieveChunks } from "@/lib/rag/retrieval";
+import { MANUALS, evidencePageLink } from "@/lib/rag/docs";
+import type { ManualId } from "@/lib/rag/docs";
 import {
   askOllama,
   streamOllama,
@@ -51,12 +53,43 @@ const getNearestChunks = (question: string, limit: number): StoredChunk[] =>
     .slice(0, limit);
 
 type RetrievalChunk = {
+  docId: ManualId;
   page: number;
   text: string;
   section: string | null;
   chapter?: string | null;
+  pageLabel?: string | null;
+  standard?: string | null;
+  sheetOf?: number | null;
+  sheetCount?: number | null;
   score: number;
   id: string;
+};
+
+/**
+ * A page, addressed inside a manual.
+ *
+ * Page numbers are only unique within a manual: 20 exists in all five. Any
+ * lookup that takes a bare page number and reads evidence is a latent
+ * cross-manual mix-up, so the address is a pair and stays a pair.
+ */
+type PageLocation = { docId: ManualId; page: number };
+
+const locationKey = (docId: string, page: number) => `${docId}:${page}`;
+
+const locationsOf = (chunks: Array<{ docId: ManualId; page: number }>): PageLocation[] => {
+  const seen = new Map<string, PageLocation>();
+  for (const chunk of chunks) {
+    if (Number.isFinite(chunk.page)) {
+      seen.set(locationKey(chunk.docId, chunk.page), {
+        docId: chunk.docId,
+        page: chunk.page,
+      });
+    }
+  }
+  return [...seen.values()].sort(
+    (a, b) => a.docId.localeCompare(b.docId) || a.page - b.page
+  );
 };
 
 type ParsedModelResponse = {
@@ -530,7 +563,17 @@ const pickCitationSpan = (chunkText: string, question: string): string => {
  */
 const buildCitation = (
   quote: string | undefined | null,
-  chunk: { page: number; text: string; section?: string | null; chapter?: string | null },
+  chunk: {
+    docId: ManualId;
+    page: number;
+    text: string;
+    section?: string | null;
+    chapter?: string | null;
+    pageLabel?: string | null;
+    standard?: string | null;
+    sheetOf?: number | null;
+    sheetCount?: number | null;
+  },
   question?: string
 ): SourceCitation | null => {
   const source = chunk.text ?? "";
@@ -547,12 +590,16 @@ const buildCitation = (
     return null;
   }
   return {
+    docId: chunk.docId,
     page: chunk.page,
     quote: sanitize(resolved.text),
     section: chunk.section ?? null,
     chapter: chunk.chapter ?? null,
-    pageLabel: String(chunk.page),
-    sourceLink: `${getAppConfig().ESR_SOURCE_LINK_PREFIX}${chunk.page}`,
+    pageLabel: chunk.pageLabel ?? null,
+    standard: chunk.standard ?? null,
+    sheetOf: chunk.sheetOf ?? null,
+    sheetCount: chunk.sheetCount ?? null,
+    sourceLink: evidencePageLink(chunk.docId, chunk.page),
     quoteStart: resolved.start,
     quoteEnd: resolved.end,
   };
@@ -589,53 +636,59 @@ const mergeFigureLists = (primary: FigureEvidence[], extra: FigureEvidence[]) =>
   return out;
 };
 
+/**
+ * Guarantee a viewer for every cited page, even when nothing was catalogued on
+ * it. The page render is the evidence; a crop is a convenience on top of it.
+ */
 const ensurePagePreviewFigures = (
   figures: FigureEvidence[],
-  pages: number[],
-  sourceLinkPrefix: string
+  locations: PageLocation[]
 ): FigureEvidence[] => {
-  const covered = new Set(figures.map((f) => f.page));
+  const covered = new Set(figures.map((f) => locationKey(f.docId, f.page)));
   const seenIds = new Set(figures.map((f) => f.id));
   const out = [...figures];
-  for (const page of pages) {
-    if (!Number.isFinite(page) || covered.has(page)) {
+  for (const location of locations) {
+    const key = locationKey(location.docId, location.page);
+    if (!Number.isFinite(location.page) || covered.has(key)) {
       continue;
     }
-    const id = `page-preview-${page}`;
+    const id = `page-preview-${key}`;
     if (seenIds.has(id)) {
       continue;
     }
-    covered.add(page);
+    covered.add(key);
     seenIds.add(id);
     out.push({
       id,
-      page,
-      caption: `Page ${page} (preview)`,
-      sourceLink: `${sourceLinkPrefix}${page}`,
+      docId: location.docId,
+      page: location.page,
+      caption: `${MANUALS[location.docId].code} page ${location.page}`,
+      sourceLink: evidencePageLink(location.docId, location.page),
       chapter: null,
-      figureUrl: `/figures/page-${page}.png`,
+      figureUrl: `/evidence/${location.docId}/page-${location.page}.png`,
       ocrText: null,
     });
   }
   return out;
 };
 
-const finalizeFigures = (figures: FigureEvidence[], quoteSet: RetrievalChunk[]): FigureEvidence[] => {
-  const pages = [...new Set(quoteSet.map((c) => c.page))];
-  return ensurePagePreviewFigures(figures, pages, getAppConfig().ESR_SOURCE_LINK_PREFIX);
-};
+const finalizeFigures = (
+  figures: FigureEvidence[],
+  quoteSet: RetrievalChunk[]
+): FigureEvidence[] => ensurePagePreviewFigures(figures, locationsOf(quoteSet));
 
 const fallbackFigureEvidence = (quoteSet: RetrievalChunk[], pageFigures: FigureEvidence[]) => {
-  const byPage = new Map<number, FigureEvidence>();
+  const byPage = new Map<string, FigureEvidence>();
   for (const figure of pageFigures) {
-    if (!byPage.has(figure.page)) {
-      byPage.set(figure.page, figure);
+    const key = locationKey(figure.docId, figure.page);
+    if (!byPage.has(key)) {
+      byPage.set(key, figure);
     }
   }
 
   const selected: FigureEvidence[] = [];
   for (const chunk of quoteSet) {
-    const match = byPage.get(chunk.page);
+    const match = byPage.get(locationKey(chunk.docId, chunk.page));
     if (match) {
       selected.push(match);
       break;
@@ -764,6 +817,7 @@ const fallbackAnswer = (
       notCovered: citations.length === 0,
       intent: "none",
       chapters: [...new Set(quoteSet.map((c) => c.chapter).filter(Boolean))] as string[],
+      docs: [...new Set(quoteSet.map((c) => c.docId))],
       latencyMs: 0,
     },
   };
@@ -987,10 +1041,11 @@ const buildFigureEvidence = (
   figureResponses: Array<{ chunkIndex?: number }> | undefined,
   pageFigures: FigureEvidence[]
 ) => {
-  const byPage = new Map<number, FigureEvidence>();
+  const byPage = new Map<string, FigureEvidence>();
   for (const figure of pageFigures) {
-    if (!byPage.has(figure.page)) {
-      byPage.set(figure.page, figure);
+    const key = locationKey(figure.docId, figure.page);
+    if (!byPage.has(key)) {
+      byPage.set(key, figure);
     }
   }
 
@@ -1003,11 +1058,11 @@ const buildFigureEvidence = (
     if (typeof chunkIndex !== "number" || chunkIndex < 0) {
       continue;
     }
-    const page = quoteSet[chunkIndex]?.page;
-    if (!page) {
+    const chunk = quoteSet[chunkIndex];
+    if (!chunk) {
       continue;
     }
-    const match = byPage.get(page);
+    const match = byPage.get(locationKey(chunk.docId, chunk.page));
     if (!match) {
       continue;
     }
@@ -1022,7 +1077,7 @@ const buildFigureEvidence = (
   }
 
   for (const chunk of quoteSet) {
-    const match = byPage.get(chunk.page);
+    const match = byPage.get(locationKey(chunk.docId, chunk.page));
     if (match && !seen.has(match.id)) {
       selected.push(match);
       seen.add(match.id);
@@ -1129,29 +1184,33 @@ type AnswerCoreOptions = AnswerQuestionOptions & {
  * that case counts rows.
  */
 const countDiagrams = (
-  pages: number[],
+  locations: PageLocation[],
   allFigures: FigureEvidence[],
   visualFirst: boolean
 ): number => {
   if (!visualFirst) {
-    return pages.length;
+    return locations.length;
   }
-  const pageSet = new Set(pages);
-  const rowsByPage = new Map<number, number>();
+  const wanted = new Set(locations.map((l) => locationKey(l.docId, l.page)));
+  const rowsByLocation = new Map<string, number>();
   for (const figure of allFigures) {
-    if (!pageSet.has(figure.page)) {
+    const key = locationKey(figure.docId, figure.page);
+    if (!wanted.has(key)) {
       continue;
     }
-    rowsByPage.set(figure.page, (rowsByPage.get(figure.page) ?? 0) + 1);
+    rowsByLocation.set(key, (rowsByLocation.get(key) ?? 0) + 1);
   }
-  return pages.reduce((total, page) => total + Math.max(rowsByPage.get(page) ?? 0, 1), 0);
+  return locations.reduce(
+    (total, l) => total + Math.max(rowsByLocation.get(locationKey(l.docId, l.page)) ?? 0, 1),
+    0
+  );
 };
 
 const retrievedProgress = (
   totalCandidates: number,
   facts: { matchedChunks: number; confidence: number },
   chapters: string[],
-  pages: number[],
+  locations: PageLocation[],
   allFigures: FigureEvidence[],
   visualFirst: boolean
 ): RetrievedProgress => ({
@@ -1159,8 +1218,8 @@ const retrievedProgress = (
   matchedChunks: facts.matchedChunks,
   confidence: facts.confidence,
   chapters,
-  pages,
-  figureCount: countDiagrams(pages, allFigures, visualFirst),
+  pages: locations.map((l) => l.page),
+  figureCount: countDiagrams(locations, allFigures, visualFirst),
 });
 
 /** The one summary shape every answer reports, whatever produced the prose. */
@@ -1168,7 +1227,8 @@ const retrievalSummaryFor = (
   candidates: number,
   summary: Awaited<ReturnType<typeof retrieveChunks>>["summary"],
   chapters: string[],
-  retrievalLatencyMs: number
+  retrievalLatencyMs: number,
+  docs: ManualId[] = []
 ): ChatAnswer["retrievalSummary"] => ({
   totalCandidates: candidates,
   matchedChunks: summary.matchedChunks,
@@ -1177,6 +1237,7 @@ const retrievalSummaryFor = (
   notCovered: summary.notCovered,
   intent: summary.intent.trigger,
   chapters,
+  docs,
   latencyMs: retrievalLatencyMs,
 });
 
@@ -1255,6 +1316,7 @@ const answerCore = async (
         notCovered: true,
         intent: summary.intent.trigger,
         chapters,
+        docs: [...new Set(nearMisses.map((c) => c.docId))],
         latencyMs: retrievalLatencyMs,
       },
     };
@@ -1270,21 +1332,27 @@ const answerCore = async (
     ...new Set(candidates.map((c) => c.chunk.chapter).filter((v): v is string => Boolean(v))),
   ];
   const quoteSet = candidates.map((result) => ({
+    docId: result.chunk.docId,
     page: result.chunk.page,
     text: result.chunk.text,
     section: result.chunk.section ?? null,
     chapter: result.chunk.chapter ?? null,
+    pageLabel: result.chunk.pageLabel ?? null,
+    standard: result.chunk.standard ?? null,
+    sheetOf: result.chunk.sheetOf ?? null,
+    sheetCount: result.chunk.sheetCount ?? null,
     score: result.confidence,
     id: result.chunk.id,
   }));
-  const pages = [...new Set(quoteSet.map((chunk) => chunk.page))].sort((a, b) => a - b);
+  const locations = locationsOf(quoteSet);
+  const docs = [...new Set(quoteSet.map((chunk) => chunk.docId))];
 
   const allFigures = getAllPageFigures();
   const retrieved = retrievedProgress(
     candidates.length,
     summary,
     chapters,
-    pages,
+    locations,
     allFigures,
     visualFirst
   );
@@ -1312,10 +1380,9 @@ const answerCore = async (
   const finalizeFallback = () => {
     const fallback = buildFallback();
     if (visualFirst && quoteSet.length > 0) {
-      const fallbackPages = [...new Set(quoteSet.map((c) => c.page))];
       fallback.figures = mergeFigureLists(
         fallback.figures,
-        getFigureEvidenceForPages(fallbackPages)
+        getFigureEvidenceForPages(locationsOf(quoteSet))
       );
     }
     fallback.figures = finalizeFigures(fallback.figures, quoteSet);
@@ -1323,7 +1390,8 @@ const answerCore = async (
       candidates.length,
       summary,
       chapters,
-      retrievalLatencyMs
+      retrievalLatencyMs,
+      locationsOf(quoteSet).map((l) => l.docId)
     );
     return fallback;
   };
@@ -1368,12 +1436,16 @@ const answerCore = async (
       const start = chunk.text.indexOf(text);
       if (start < 0 || text.length < 8) return null;
       return {
+        docId: chunk.docId,
         page: chunk.page,
         quote: text,
         section: chunk.section ?? null,
         chapter: chunk.chapter ?? null,
-        pageLabel: String(chunk.page),
-        sourceLink: `${getAppConfig().ESR_SOURCE_LINK_PREFIX}${chunk.page}`,
+        pageLabel: chunk.pageLabel ?? null,
+        standard: chunk.standard ?? null,
+        sheetOf: chunk.sheetOf ?? null,
+        sheetCount: chunk.sheetCount ?? null,
+        sourceLink: evidencePageLink(chunk.docId, chunk.page),
         quoteStart: start,
         quoteEnd: start + text.length,
       };
@@ -1384,14 +1456,14 @@ const answerCore = async (
       (c): c is SourceCitation => c !== null,
     );
     if (tableCitations.length === 2) {
-      const section = tableVerdict.table.section ?? "the ESR";
+      const section =
+        tableVerdict.table.section ?? `the ${MANUALS[tableVerdict.table.docId].code}`;
       const tableAnswer = `${tableVerdict.token} is marked ${tableVerdict.code} (${tableVerdict.meaning}) in ${section}.`;
       let tableFigures = fallbackFigureEvidence(quoteSet, allFigures);
       if (visualFirst && quoteSet.length > 0) {
-        const fallbackPages = [...new Set(quoteSet.map((c) => c.page))];
         tableFigures = mergeFigureLists(
           tableFigures,
-          getFigureEvidenceForPages(fallbackPages),
+          getFigureEvidenceForPages(locationsOf(quoteSet)),
         );
       }
       tableFigures = finalizeFigures(tableFigures, quoteSet);
@@ -1408,6 +1480,7 @@ const answerCore = async (
           summary,
           chapters,
           retrievalLatencyMs,
+          [tableVerdict.table.docId],
         ),
       };
       saveCacheEntry(
@@ -1512,7 +1585,7 @@ const answerCore = async (
 
   let figuresOut = figures;
   if (visualFirst && quoteSet.length > 0) {
-    figuresOut = mergeFigureLists(figuresOut, getFigureEvidenceForPages(pages));
+    figuresOut = mergeFigureLists(figuresOut, getFigureEvidenceForPages(locationsOf(quoteSet)));
   }
   figuresOut = finalizeFigures(figuresOut, quoteSet);
 
@@ -1533,7 +1606,8 @@ const answerCore = async (
       candidates.length,
       summary,
       chapters,
-      retrievalLatencyMs
+      retrievalLatencyMs,
+      docs
     ),
   };
 

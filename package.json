@@ -6,16 +6,18 @@
     "node": "22.16.0"
   },
   "scripts": {
-    "parse:esr": "bash scripts/render/parse-esr.sh",
-    "ingest:esr": "tsx scripts/ingest-esr.ts",
-    "ingest:esr:force": "tsx scripts/ingest-esr.ts --force-render",
+    "parse:manuals": "bash scripts/render/parse-manuals.sh",
+    "ingest:manuals": "tsx scripts/ingest-manuals.ts",
+    "ingest:manuals:force": "tsx scripts/ingest-manuals.ts --force-render",
     "build:eval": "tsx scripts/build-eval-set.ts",
-    "eval:esr": "tsx scripts/eval-esr.ts",
+    "eval:manuals": "tsx scripts/eval-esr.ts",
     "dev": "next dev -p 3001",
     "build": "next build",
     "start": "next start -p 3001",
     "lint": "eslint src scripts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build:evidence": ".venv-mineru/bin/python scripts/render/evidence.py build",
+    "plan:evidence": ".venv-mineru/bin/python scripts/render/evidence.py plan"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",

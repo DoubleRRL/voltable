@@ -2,7 +2,7 @@
 
 import { useRef, useState } from "react";
 
-import { EsrPdfDialog } from "./EsrPdfDialog";
+import { ManualEvidenceDialog } from "./ManualEvidenceDialog";
 
 import { cn } from "@/lib/utils";
 import { fontWeights } from "@/lib/font-weight";
@@ -15,6 +15,8 @@ import {
 import { FluidHoverHighlight } from "@/components/fluid-hover-highlight";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+
+import { MANUALS, citeLabel, type ManualId } from "@/lib/rag/docs";
 
 import { ChapterBadge } from "./ChapterBadge";
 import { chapterVars } from "./chapters";
@@ -29,21 +31,31 @@ const shortSection = (section: string | null | undefined, limit = 42) => {
   return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
 };
 
-const citationLabel = (citation: SourceCitation) => {
-  const printed =
-    citation.pageLabel && citation.pageLabel !== String(citation.page)
-      ? citation.pageLabel
-      : String(citation.page);
-  return `p.${printed}`;
-};
+/**
+ * Where the citation is, in the manual's own words.
+ *
+ * "ESR 3-24" and "DOH AC 370 Sheet 2 of 2" are both printed-page references,
+ * but the second has no page number to give: DOH and UGS number standards and
+ * sheets, not pages. Showing a PDF index instead would be a reference the
+ * planner cannot use in the document itself.
+ */
+const citationLabel = (citation: SourceCitation) =>
+  citeLabel(
+    citation.docId,
+    citation.pageLabel ?? null,
+    citation.chapter ?? null,
+    citation.standard ?? citation.chapter ?? null,
+    citation.sheetOf ?? null,
+    citation.sheetCount ?? null
+  );
 
 type CitationRowProps = {
   citation: SourceCitation;
   /** Index in the rail's fluid-hover list. */
   index: number;
   registerItem: (index: number, element: HTMLElement | null) => void;
-  /** Opens the cited page in the in-app ESR dialog. */
-  onOpenPage: (page: number) => void;
+  /** Opens the cited page in the in-app evidence dialog. */
+  onOpenPage: (citation: SourceCitation) => void;
 };
 
 /**
@@ -62,6 +74,7 @@ function CitationRow({ citation, index, registerItem, onOpenPage }: CitationRowP
 
   const section = shortSection(citation.section);
   const chapter = citation.chapter?.trim();
+  const manual = MANUALS[citation.docId];
 
   return (
     <div
@@ -75,12 +88,20 @@ function CitationRow({ citation, index, registerItem, onOpenPage }: CitationRowP
         <Badge variant="dot" color="gray" size="compact" className="tabular-nums">
           {citationLabel(citation)}
         </Badge>
+        {manual && manual.classification !== "public" ? (
+          <span
+            className={cn(typeClass("caption"), "text-muted-foreground")}
+            title={`${manual.title} — ${manual.classification}`}
+          >
+            {manual.classification === "confidential" ? "confidential" : "internal"}
+          </span>
+        ) : null}
         {chapter ? <ChapterBadge chapter={chapter} variant="rule" /> : null}
         <span
           className={cn(typeClass("body"), "min-w-0 flex-1 truncate text-foreground")}
           style={{ fontVariationSettings: fontWeights.normal }}
         >
-          {section ?? "ESR"}
+          {section ?? MANUALS[citation.docId].code}
         </span>
       </div>
       {citation.quote ? (
@@ -96,11 +117,11 @@ function CitationRow({ citation, index, registerItem, onOpenPage }: CitationRowP
         type="button"
         size="compact"
         variant="tertiary"
-        onClick={() => onOpenPage(citation.page)}
+        onClick={() => onOpenPage(citation)}
         className="w-fit cursor-pointer"
         style={{ fontVariationSettings: fontWeights.semibold }}
       >
-        Page {citation.page}
+        Open page
       </Button>
     </div>
   );
@@ -109,8 +130,8 @@ function CitationRow({ citation, index, registerItem, onOpenPage }: CitationRowP
 type EvidenceRailProps = {
   citations: SourceCitation[];
   className?: string;
-  /** Page to open in the in-app ESR dialog. */
-  onOpenPage?: (page: number, chapter: string | null) => void;
+  /** Page to open in the in-app evidence dialog. */
+  onOpenPage?: (docId: ManualId, page: number, chapter: string | null, locationLabel: string | null) => void;
 };
 
 /**
@@ -122,14 +143,25 @@ export function EvidenceRail({ citations, className, onOpenPage }: EvidenceRailP
   const shape = useShape();
   const listRef = useRef<HTMLDivElement>(null);
   const hover = useFluidHover(listRef);
-  const [pdfPage, setPdfPage] = useState<{ page: number; chapter: string | null } | null>(null);
+  const [opened, setOpened] = useState<{
+    docId: ManualId;
+    page: number;
+    chapter: string | null;
+    locationLabel: string | null;
+  } | null>(null);
 
-  const openPage = (page: number, chapter: string | null) => {
+  const openPage = (citation: SourceCitation) => {
+    const locationLabel = citationLabel(citation);
     if (onOpenPage) {
-      onOpenPage(page, chapter);
+      onOpenPage(citation.docId, citation.page, citation.chapter ?? null, locationLabel);
       return;
     }
-    setPdfPage({ page, chapter });
+    setOpened({
+      docId: citation.docId,
+      page: citation.page,
+      chapter: citation.chapter ?? null,
+      locationLabel,
+    });
   };
 
   return (
@@ -156,18 +188,20 @@ export function EvidenceRail({ citations, className, onOpenPage }: EvidenceRailP
         <FluidHoverHighlight hover={hover} className={cn("z-0", shape.bg)} />
         {citations.map((citation, index) => (
           <CitationRow
-            key={`${citation.page}-${index}`}
+            key={`${citation.docId}-${citation.page}-${index}`}
             citation={citation}
             index={index}
             registerItem={hover.registerItem}
-            onOpenPage={(page) => openPage(page, citation.chapter ?? null)}
+            onOpenPage={openPage}
           />
         ))}
       </div>
-      <EsrPdfDialog
-        page={pdfPage?.page ?? null}
-        chapter={pdfPage?.chapter ?? null}
-        onClose={() => setPdfPage(null)}
+      <ManualEvidenceDialog
+        docId={opened?.docId ?? null}
+        page={opened?.page ?? null}
+        chapter={opened?.chapter ?? null}
+        locationLabel={opened?.locationLabel ?? null}
+        onClose={() => setOpened(null)}
       />
     </aside>
   );

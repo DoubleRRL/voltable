@@ -1,6 +1,8 @@
 export type ChunkType = "text" | "table" | "figure" | "caption";
 export type EvidenceType = "paragraph" | "table" | "figure";
 
+import type { ManualId } from "./docs";
+
 /** Ingestion / retrieval role (body vs narrative–visual pairs). */
 export type ChunkRole =
   | "body"
@@ -15,21 +17,37 @@ export type ChunkRole =
 export type VisualKind = "table" | "figure" | "diagram";
 
 /**
- * ESR chapter, e.g. "ESR-2". The manual is organised into cohesive chapters
- * and a question about one topic almost always answers within it, so the
- * chapter is both a filter and a retrieval prior.
+ * Manual chapter or standard number, e.g. "ESR-3", "ADS-10", "PLM-2", and for
+ * the sheet-numbered manuals the standard itself ("AC 120", "SS 564").
+ *
+ * The manuals are organised into cohesive chapters and a question about one
+ * topic almost always answers within it, so the chapter is both a filter and a
+ * retrieval prior. Sheet-numbered manuals have no pages to filter on, which is
+ * why the standard number carries the same weight a chapter does here.
  */
-export type EsrChapter = string;
+export type ManualChapter = string;
 
-/** How an answer's support relates to the ESR. */
+/** How a citation points at a location: a printed page, or a standard sheet. */
+export type LocationInManual = {
+  /** Printed page label on page-numbered manuals: "3-24". */
+  pageLabel?: string | null;
+  /** Standard number on sheet-numbered manuals: "AC 120". */
+  standard?: string | null;
+  sheetOf?: number | null;
+  sheetCount?: number | null;
+};
+
+/** How an answer's support relates to the manuals. */
 export type Grounding = "esr" | "partial" | "none";
 
-export interface SourceCitation {
+export interface SourceCitation extends LocationInManual {
+  /** Which manual this came from. */
+  docId: ManualId;
+  /** PDF page index; only ever used to address stored evidence, never shown. */
   page: number;
   section?: string | null;
   chapter?: string | null;
   quote: string;
-  pageLabel?: string | null;
   sourceLink: string;
   /** Character offsets of `quote` within the source chunk text, when verified. */
   quoteStart?: number;
@@ -52,17 +70,20 @@ export interface VisualAssetTextLayers {
 }
 
 /** Cataloged table / figure / diagram with section path + exceptions. */
-export interface VisualAsset {
+export interface VisualAsset extends LocationInManual {
   id: string;
+  /** Which manual the crop came from. */
+  docId: ManualId;
+  /** PDF page index the bbox was measured against. */
   page: number;
   kind: VisualKind;
   chapter: string | null;
   sectionKey: string | null;
   sectionPath: string | null;
   caption: string;
-  /** Cropped figure PNG. Preferred for display. */
+  /** Cropped figure image. Preferred for display. */
   figureUrl: string | null;
-  /** Full rendered page PNG. Fallback when a crop is unavailable. */
+  /** Full rendered page image. Fallback when a crop is unavailable. */
   thumbnailUrl: string | null;
   /** Normalized crop box in page coords, for debugging and re-cropping. */
   bbox: [number, number, number, number] | null;
@@ -74,17 +95,18 @@ export interface VisualAsset {
   createdAt: number;
 }
 
-export interface IndexedChunk {
+export interface IndexedChunk extends LocationInManual {
   id: string;
-  docId: string;
+  docId: ManualId;
   page: number;
   chunkType: ChunkType;
   evidenceType: EvidenceType;
   text: string;
   section?: string | null;
   sectionKey?: string | null;
-  chapter?: EsrChapter | null;
-  pageLabel?: string | null;
+  chapter?: ManualChapter | null;
+  /** Standard number on sheet-numbered manuals, kept beside `chapter`. */
+  standard?: string | null;
   sourceLink: string;
   embedding?: number[];
   visualPath?: string | null;
@@ -105,13 +127,15 @@ export interface RetrievalInput {
   question: string;
 }
 
-export interface FigureEvidence {
+export interface FigureEvidence extends LocationInManual {
   id: string;
+  /** Which manual the crop came from. */
+  docId: ManualId;
   page: number;
   caption: string;
   sourceLink: string;
   chapter: string | null;
-  /** Cropped figure PNG. */
+  /** Cropped figure image. */
   figureUrl: string;
   /** Text transcribed from inside the figure, for search and citation. */
   ocrText: string | null;
@@ -130,9 +154,9 @@ export interface ChatAnswer {
   figures: FigureEvidence[];
   /** Stored exceptions attached from visual assets (ingest-time only). */
   exceptions?: StoredException[];
-  /** Whether the ESR supports this answer, partially, or not at all. */
+  /** Whether the manuals support this answer, partially, or not at all. */
   grounding: Grounding;
-  /** True when nothing in the ESR cleared the retrieval threshold. */
+  /** True when nothing in the manuals cleared the retrieval threshold. */
   notCovered: boolean;
   retrievalSummary: {
     totalCandidates: number;
@@ -144,7 +168,9 @@ export interface ChatAnswer {
     notCovered: boolean;
     /** Why retrieval ran the way it did: figure-word / measurement / none. */
     intent: string;
-    chapters: EsrChapter[];
+    chapters: ManualChapter[];
+    /** Which manuals contributed evidence, so a planner knows what was searched. */
+    docs: ManualId[];
     latencyMs: number;
   };
 }

@@ -588,7 +588,7 @@ const loadBodyChunks = (db: Database.Database): BodyChunkRow[] => {
 
 const main = () => {
   const config = getAppConfig();
-  const dbPath = path.resolve(process.cwd(), config.ESR_DB_PATH);
+  const dbPath = path.resolve(process.cwd(), config.MANUALS_DB_PATH);
   const outPath = path.resolve(process.cwd(), "data/eval/golden.json");
 
   const { db, chunkCount } = readDb(dbPath);
@@ -741,7 +741,7 @@ const main = () => {
       "string equality. goldPages and goldChapters are the figure's real location in the document, " +
       "so the retriever cannot confirm itself.",
     generatedFrom: {
-      dbPath: config.ESR_DB_PATH,
+      dbPath: config.MANUALS_DB_PATH,
       sources: [
         "visual_assets.text_layers_json.ocr",
         "visual_assets.caption",

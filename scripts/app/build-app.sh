@@ -2,8 +2,13 @@
 # Assemble the macOS .app bundle for ESR Assistant.
 #
 # Produces a self-contained app: bundled node, a standalone Next.js server, the
-# SQLite index, the figure crops, and the ESR PDF that citations deep-link into.
-# Nothing at runtime depends on the machine having Node, npm, or the repo.
+# SQLite index, and the evidence images a citation opens. Nothing at runtime
+# depends on the machine having Node, npm, or the repo.
+#
+# The source manuals are deliberately NOT in here. Five manuals are 2,591 pages
+# and 212 MB of PDF; a citation needs the one page it points at, not the manual
+# it came from, so the manual stays an ingest input and the app carries derived
+# evidence only. See `docs/evidence.md`.
 #
 #   scripts/app/build-app.sh [output-dir]     # default: dist
 set -euo pipefail
@@ -27,8 +32,8 @@ step "Preflight"
 export PATH="$HOME/.nvm/versions/node/v$NODE_VERSION/bin:$PATH"
 node -e 'process.exit(Number(process.versions.modules)===127?0:1)' \
   || { echo "wrong ABI: better-sqlite3 needs node ABI 127 (node 22)" >&2; exit 1; }
-[ -f data/esr.sqlite ] || { echo "missing data/esr.sqlite — run npm run ingest:esr" >&2; exit 1; }
-[ -f "../Electrical Service Requirements (ESR).pdf" ] || { echo "missing ESR pdf" >&2; exit 1; }
+[ -f data/manuals.sqlite ] || { echo "missing data/manuals.sqlite — run npm run ingest:manuals" >&2; exit 1; }
+[ -d public/evidence ] || { echo "missing public/evidence — run npm run ingest:manuals" >&2; exit 1; }
 echo "node $(node -v) · port $PORT"
 
 step "Building the standalone server"
@@ -50,27 +55,32 @@ mkdir -p "$STAGE/$APP_NAME.app/Contents/Resources/runtime/.next"
 cp -R .next/static "$STAGE/$APP_NAME.app/Contents/Resources/runtime/.next/static"
 cp -R public "$STAGE/$APP_NAME.app/Contents/Resources/runtime/public"
 
-step "Index and documents"
+step "Index"
 mkdir -p "$STAGE/$APP_NAME.app/Contents/Resources/runtime/data"
-cp data/esr.sqlite "$STAGE/$APP_NAME.app/Contents/Resources/runtime/data/esr.sqlite"
-# Citations deep-link to /esr.pdf#page=N, so the PDF has to be present for a
-# planner to actually check the answer.
-cp "../Electrical Service Requirements (ESR).pdf" \
-   "$STAGE/$APP_NAME.app/Contents/Resources/runtime/public/esr.pdf"
+cp data/manuals.sqlite "$STAGE/$APP_NAME.app/Contents/Resources/runtime/data/manuals.sqlite"
 
-step "Shrinking fallback page renders"
-# Page renders are only shown when a cited page has no catalogued crop. They are
-# 408 MB at 2x DPI for an image the UI scales down anyway, so they ship at
-# 1000px wide. Figure crops are never touched: those are the primary display.
-FIGDIR="$STAGE/$APP_NAME.app/Contents/Resources/runtime/public/figures"
-before=$(du -sk "$FIGDIR" | cut -f1)
+step "Rescaling evidence images"
+# Everything under public/evidence ships at the size it was rendered at, which is
+# 2x DPI on a letter page for an image the UI shows at 112px or opens in a
+# resizable panel. Downscaling to the largest useful rendition is the single
+# biggest size lever in the bundle and costs nothing visible: the panel scales
+# up a little on a very large display, which is the right trade against shipping
+# three times the pixels.
+EVIDENCE_DIR="$STAGE/$APP_NAME.app/Contents/Resources/runtime/public/evidence"
+before=$(du -sk "$EVIDENCE_DIR" | cut -f1)
 count=0
-for f in "$FIGDIR"/page-*.png; do
+while IFS= read -r f; do
   [ -e "$f" ] || continue
-  sips -Z 1000 "$f" --out "$f" >/dev/null 2>&1 && count=$((count+1))
-done
-after=$(du -sk "$FIGDIR" | cut -f1)
-echo "rescaled $count page renders: $((before/1024))MB -> $((after/1024))MB"
+  # Figure crops keep more resolution than whole-page renders: a crop is the
+  # thing a planner reads a dimension off, and its source box is small.
+  case "$f" in
+    */fig-*) MAXDIM=1400 ;;
+    *)       MAXDIM=1000 ;;
+  esac
+  sips -Z "$MAXDIM" "$f" --out "$f" >/dev/null 2>&1 && count=$((count+1))
+done < <(find "$EVIDENCE_DIR" -name '*.png' -type f)
+after=$(du -sk "$EVIDENCE_DIR" | cut -f1)
+echo "rescaled $count evidence images: $((before/1024))MB -> $((after/1024))MB"
 
 step "Bundling the node runtime"
 cp "$NVM_NODE" "$STAGE/$APP_NAME.app/Contents/Resources/bin/node"
@@ -140,6 +150,18 @@ rm -rf "$ICONSET"
 step "Ad-hoc signing"
 codesign --force --deep --sign - "$STAGE/$APP_NAME.app" 2>&1 | tail -2 || \
   echo "codesign unavailable; the app will still run locally"
+
+step "Bundle budget"
+# A size regression that nobody notices is a size regression nobody fixes, so
+# the budget is checked rather than described.
+APP_BYTES=$(du -sk "$STAGE/$APP_NAME.app" | cut -f1)
+EVIDENCE_BYTES=$(du -sk "$EVIDENCE_DIR" | cut -f1)
+BUDGET_MB="${EVIDENCE_BUDGET_MB:-600}"
+echo "app total:    $((APP_BYTES/1024))MB"
+echo "  evidence:   $((EVIDENCE_BYTES/1024))MB (budget ${BUDGET_MB}MB)"
+if [ "$((EVIDENCE_BYTES/1024))" -gt "$BUDGET_MB" ]; then
+  echo "evidence over budget: check for uncropped page renders or an unfiltered doc" >&2
+fi
 
 step "Result"
 du -sh "$STAGE/$APP_NAME.app"

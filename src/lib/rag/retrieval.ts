@@ -521,13 +521,18 @@ export const retrieveChunks = async (
       if (sibs.length > 0) sibsByTable.set(group.table.id, sibs);
     }
     // Fresh short text per grouped page (legends, footnotes, titles).
-    const pages = [...new Set(groups.map((g) => g.page))];
-    const freshByPage = new Map<number, StoredChunk[]>();
-    for (const legend of getShortTextChunksByPages(pages)) {
+    const legendLocations = [
+      ...new Map(
+        groups.map((g) => [`${g.table.docId}:${g.page}`, { docId: g.table.docId, page: g.page }])
+      ).values(),
+    ];
+    const freshByPage = new Map<string, StoredChunk[]>();
+    for (const legend of getShortTextChunksByPages(legendLocations)) {
       if (inList.has(legend.id)) continue;
-      const list = freshByPage.get(legend.page) ?? [];
+      const key = `${legend.docId}:${legend.page}`;
+      const list = freshByPage.get(key) ?? [];
       list.push(legend);
-      freshByPage.set(legend.page, list);
+      freshByPage.set(key, list);
     }
     // Short text already in the ranking that belongs to a group moves up to
     // it — but only from below its slot.
@@ -591,7 +596,7 @@ export const retrieveChunks = async (
         text: string;
         make: (score: number) => (typeof merged)[number];
       }> = [
-        ...(freshByPage.get(group.page) ?? []).map((legend) => ({
+        ...(freshByPage.get(`${group.table.docId}:${group.page}`) ?? []).map((legend) => ({
           key: legend.id,
           text: legend.text,
           make: (score: number) => ({ ...scoreChunk(legend, intent, bm25ById), score }),

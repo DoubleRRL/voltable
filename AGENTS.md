@@ -210,16 +210,73 @@ keeps SSR and first client render identical, or React 418s). Empty state only;
 the conversation view never shows figures unasked.
 
 **Figure accuracy comes from the manual, not from memory.** Every equipment
-figure is drawn against the ESR's own drawings (`public/figures/fig-p*-0.png`):
-round poles with grain caps, meter boards on posts with burial, risers with
-sweeps into grade plus ground rods, guys as taut wire to a rodded anchor with
-a guard. The scheme contract per figure file: one `Plate`, a module-scope
-`field()`, `ScatterBox` parts numbered in paint order with staggered indices,
-SVG `path` face details only, exactly one `Press` whose sole output is a glow
-flash, disabled while `transition` is defined, own `--chapter-hue`. Diagonals
-are drawn curves (boxes are axis-aligned); wires fade unstaggered via `veil`.
-Verify rest geometry with `shoot.isokit.mjs` against `next start` — never
-`next dev`, whose chunks do not hydrate here.
+figure is drawn against a manual's own drawings, not just the ESR's
+(`public/evidence/<manual>/fig-*.png`): round poles with grain caps, meter
+boards on posts with burial, risers with sweeps into grade plus ground rods,
+guys as taut wire to a rodded anchor with a guard. The three originally
+approved figures stay. The seven that followed were drawn for equipment the ESR
+does not depict — it has no guy anchor, no cutout, no recloser, no PME, no
+dead-end pole — which is why they kept reading as wrong no matter how they were
+redrawn. DOH carries the overhead construction standards (AC 345 double dead-end,
+AC 350 dead-end with anchor guy, AC 370 anchor guy zone of proximity) and UGS
+carries the PME structures (SS 540, SS 591, SS 587, SS 590). A figure without a
+drawing in a manual behind it does not get drawn, which is why the recloser went:
+no sheet in any of the five draws one. A steel stub pole is referenced in PLM
+2-21 and the PLT training manual but never drawn, so it is not drawn here either. The scheme contract per figure
+file: one `Plate`, a module-scope `field()`, `ScatterBox` parts numbered in
+paint order with staggered indices, SVG `path` face details only, exactly one
+`Press` whose sole output is a glow flash, disabled while `transition` is
+defined, own `--chapter-hue`. Diagonals are drawn curves (boxes are
+axis-aligned); wires fade unstaggered via `veil`. Verify rest geometry with
+`shoot.isokit.mjs` against `next start` — never `next dev`, whose chunks do not
+hydrate here.
+
+**Five manuals, and a citation is not a page number.** The corpus is ESR, ADS,
+DOH, PLM and UGS — 2,591 pages. Two consequences run through everything and
+are not to be undone:
+
+- **A page number is only unique inside a manual.** Page 20 exists in all five.
+  Every lookup that takes a bare page number and reads evidence is a latent
+  cross-manual mix-up, so `getShortTextChunksByPages` and
+  `getFigureEvidenceForPages` take `{ docId, page }` pairs. An ESR legend
+  attached to a DOH table is worse than no legend: it is a confident wrong key
+  for a code the reader then expands.
+- **Two numbering schemes.** ESR, ADS and PLM number pages (`ESR 3-24`); DOH and
+  UGS number standard sheets (`DOH AC 120 Sheet 2 of 2`) and have no page to
+  cite at all. `src/lib/rag/docs.ts` holds the registry and `citeLabel()`
+  composes from it. The PDF page index is never shown — it is an artefact of
+  which pages were extracted and does not survive the next issue.
+
+Every generated key is namespaced by manual id: asset ids, chunk ids, the
+render cache, evidence paths, citation links. The render cache is the dangerous
+one — a shared `p${page}.json` would silently serve ESR's page 73 OCR for DOH
+page 73, which is wrong data rather than a visible failure.
+
+**Page identity is read off the printed footer, not inferred.** Every manual is
+one FrameMaker template, so `scripts/render/page-facts.py` reads the header and
+footer bands by text-matrix position. It has to be positional: `extract_text()`
+on these files emits the footer as unmerged fragments in arbitrary order. The
+printed page label is then the dash-pair fragment nearest the literal `PAGE`
+token, not the first dash-pair in the band — ESR section titles end in a
+voltage, so "Underground Service Connections 0-600 V" otherwise reads as a page
+label.
+
+**The manuals are not in the app.** 212 MB of PDF against a code bundle of
+tens of megabytes, and the extracted ADS/DOH copies are subsets whose page
+numbers do not match the manual a planner holds — a bundled PDF would produce
+citations that look checkable and are not. A citation resolves to manual + issue
++ printed label + exact verified quote + crop + a one-page derivative of that
+page. `docs/evidence.md` has the full split; the bundle carries a size budget
+that `build-app.sh` fails loudly against. Each manual's own classification
+(`SCE Public` / `SCE Internal` / `SCE Confidential`) is on page one and in the
+registry, so anything that redistributes a page is a decision made with it
+visible.
+
+**MinerU runs two at a time.** The parse server runs CPU inference on this box
+(8 cores, 16 GB); it took three failed restarts and disabled itself when
+over-committed, and `mineru server restart` is the fix when `engine_unavailable`
+appears. Layout parse is the memory-hungry stage and is capped at two; render
+and OCR are per-page and run fully parallel.
 
 **The composer is a pill that opens, not a box.** The resting empty-state
 field is 163×~59px of placeholder ("Ask away") — barely bigger than the text.

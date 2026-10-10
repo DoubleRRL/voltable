@@ -495,6 +495,7 @@ const applyUsage = (message: AssistantMessage, body: StreamUsageBody): Assistant
       notCovered: false,
       intent: "",
       chapters: [],
+      docs: [],
       latencyMs: count(usage?.retrieval_latency_ms) ?? 0,
     },
   };

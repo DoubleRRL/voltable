@@ -59,7 +59,7 @@ const loadGolden = (): GoldenFile => {
     fail(
       `Golden set not found: data/eval/golden.json\n\n` +
         `Generate it first:\n` +
-        `  npm run ingest:esr     # only if data/esr.sqlite is missing or empty\n` +
+        `  npm run ingest:manuals # only if data/manuals.sqlite is missing or empty\n` +
         `  npm run build:eval      # writes data/eval/golden.json from figure OCR`
     );
   }
@@ -689,11 +689,11 @@ const run = async () => {
   const golden = loadGolden();
   const thresholds = loadThresholds();
   const config = getAppConfig();
-  const dbPath = path.resolve(process.cwd(), config.ESR_DB_PATH);
+  const dbPath = path.resolve(process.cwd(), config.MANUALS_DB_PATH);
 
   if (!fs.existsSync(dbPath)) {
     fail(
-      `ESR database not found: ${config.ESR_DB_PATH}\n\n` +
+      `ESR database not found: ${config.MANUALS_DB_PATH}\n\n` +
         `Nothing can be scored against an empty index. Populate it:\n` +
         `  npm run ingest:esr`
     );
@@ -701,7 +701,7 @@ const run = async () => {
   const dbProbe = probeDb(dbPath);
   if (!dbProbe.ok) {
     fail(
-      `ESR database not usable at ${config.ESR_DB_PATH}: ${dbProbe.detail}\n\n` +
+      `ESR database not usable at ${config.MANUALS_DB_PATH}: ${dbProbe.detail}\n\n` +
         `Nothing can be scored against an empty or missing index. Populate it:\n` +
         `  npm run ingest:esr`
     );
@@ -1045,7 +1045,7 @@ const run = async () => {
       requestTimeoutStrikes: overall.answerTimeoutStrikes,
       errors: overall.answerErrors,
     },
-    database: { path: config.ESR_DB_PATH },
+    database: { path: config.MANUALS_DB_PATH },
     metrics: {
       overall: overallSummary,
       byKind: Object.fromEntries(

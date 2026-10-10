@@ -13,10 +13,9 @@ import { SwitchgearFigure } from "./SwitchgearFigure";
 import { MeterPanelFigure } from "./MeterPanelFigure";
 import { GuyAnchorFigure } from "./GuyAnchorFigure";
 import { CutoutFigure } from "./CutoutFigure";
-import { JunctionCabinetFigure } from "./JunctionCabinetFigure";
+import { PadmountSwitchgearFigure } from "./PadmountSwitchgearFigure";
 import { CtCabinetFigure } from "./CtCabinetFigure";
 import { RiserFigure } from "./RiserFigure";
-import { RecloserFigure } from "./RecloserFigure";
 
 type FigureProps = { transition?: { progress: number; phase: "out" | "in" } };
 type FigureComponent = (props: FigureProps) => React.JSX.Element;
@@ -52,10 +51,9 @@ const FIGURES: Array<{ id: string; label: string; Component: FigureComponent }> 
   { id: "meterpanel", label: "Meter panel and service", Component: MeterPanelFigure },
   { id: "guy", label: "Guy wire and anchor", Component: GuyAnchorFigure },
   { id: "cutout", label: "Cutout and arrester", Component: CutoutFigure },
-  { id: "junction", label: "Junction cabinet", Component: JunctionCabinetFigure },
+  { id: "pme", label: "PME pad-mount switchgear", Component: PadmountSwitchgearFigure },
   { id: "ctcabinet", label: "CT cabinet and meter", Component: CtCabinetFigure },
   { id: "riser", label: "Riser and U-guard", Component: RiserFigure },
-  { id: "recloser", label: "Recloser", Component: RecloserFigure },
 ];
 
 const DWELL_MS = 7000;

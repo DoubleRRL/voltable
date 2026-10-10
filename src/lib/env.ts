@@ -21,32 +21,32 @@ const floatFromEnv = (value: string | undefined, fallback: number) => {
  * Turbopack tries to trace these paths into the output files and warns that the
  * whole project was traced. Only ingest reads this value.
  */
-export const resolveEsrPdfPath = (configured: string): string => {
+/**
+ * Locate the manual directory.
+ *
+ * Only ingest resolves manuals, so only ingest pays for the search. The app
+ * bundle ships an index and evidence images, never the source PDFs.
+ */
+export const resolveManualsDir = (configured: string): string => {
   const cwd = process.cwd();
-  const primary = path.resolve(/* turbopackIgnore: true */ cwd, configured.trim());
-  if (fs.existsSync(/* turbopackIgnore: true */ primary) && fs.statSync(/* turbopackIgnore: true */ primary).isFile()) {
-    return primary;
-  }
-  const parent = path.resolve(/* turbopackIgnore: true */ cwd, "..");
   const candidates = [
-    path.join(/* turbopackIgnore: true */ parent, "Electrical Service Requirements (ESR).pdf"),
-    path.join(/* turbopackIgnore: true */ parent, "Electrical Service Requirements (ESR).PDF"),
-    path.join(/* turbopackIgnore: true */ parent, "esr.pdf"),
-    path.join(/* turbopackIgnore: true */ cwd, "public", "esr.pdf"),
+    path.resolve(/* turbopackIgnore: true */ cwd, configured.trim()),
+    path.resolve(/* turbopackIgnore: true */ cwd, ".."),
+    path.resolve(/* turbopackIgnore: true */ cwd, "manuals"),
   ];
-  for (const filePath of candidates) {
+  for (const dir of candidates) {
     try {
       if (
-        fs.existsSync(/* turbopackIgnore: true */ filePath) &&
-        fs.statSync(/* turbopackIgnore: true */ filePath).isFile()
+        fs.existsSync(/* turbopackIgnore: true */ dir) &&
+        fs.statSync(/* turbopackIgnore: true */ dir).isDirectory()
       ) {
-        return filePath;
+        return dir;
       }
     } catch {
       /* keep searching */
     }
   }
-  return primary;
+  return candidates[0];
 };
 
 const schema = z.object({
@@ -75,13 +75,15 @@ const schema = z.object({
     .string()
     .optional()
     .transform((value) => intFromEnv(value, 90000)),
-  ESR_PDF_PATH: z
-    .string()
-    .default("../Electrical Service Requirements (ESR).pdf")
-    .transform((value) => resolveEsrPdfPath(value)),
-  ESR_DB_PATH: z.string().default("./data/esr.sqlite"),
-  /** MinerU layout JSON produced by `scripts/render/parse-esr.sh`. */
-  ESR_LAYOUT_PATH: z.string().default("./data/mineru/esr-basic.json"),
+  /**
+   * Directory holding the source manual PDFs. Ingest reads them; the running
+   * app never does, which is what keeps a 200 MB corpus out of the bundle.
+   */
+  MANUALS_DIR: z.string().default("..").transform(resolveManualsDir),
+  /** SQLite index over every ingested manual. */
+  MANUALS_DB_PATH: z.string().default("./data/manuals.sqlite"),
+  /** MinerU layout JSON, one per manual, written by scripts/render/parse.sh. */
+  MANUALS_LAYOUT_DIR: z.string().default("./data/mineru"),
   /**
    * Python interpreter for the render/OCR worker. Only `scripts/ingest-esr.ts`
    * spawns it; the web app never runs it.
@@ -101,7 +103,12 @@ const schema = z.object({
       (value) =>
         value || path.join(/* turbopackIgnore: true */ process.cwd(), ".venv-mineru", "bin", "python")
     ),
-  ESR_SOURCE_LINK_PREFIX: z.string().default("/esr.pdf#page="),
+  /**
+   * Server routes that hand out evidence for a cited location. A citation has
+   * to open something, and the whole manual is not in the bundle, so the route
+   * resolves against whatever evidence was generated for that page.
+   */
+  EVIDENCE_DIR: z.string().default("./public/evidence"),
   EMBEDDING_FALLBACK_DIM: z
     .string()
     .optional()

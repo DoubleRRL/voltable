@@ -6,6 +6,7 @@ import { createPortal } from "react-dom";
 import { motion, useReducedMotion } from "framer-motion";
 
 import { cn } from "@/lib/utils";
+import { MANUALS, citeLabel } from "@/lib/rag/docs";
 import { fontWeights } from "@/lib/font-weight";
 import { useShape } from "@/lib/shape-context";
 import { surfaceClasses } from "@/lib/surface-classes";
@@ -123,7 +124,10 @@ export function FigureLightbox({
           ref={panelRef}
           role="dialog"
           aria-modal="true"
-          aria-label={figure.caption || `ESR figure on page ${figure.page}`}
+          aria-label={
+            figure.caption ||
+            `${MANUALS[figure.docId].code} figure on ${figure.page}`
+          }
           initial={reduceMotion ? { opacity: 0, scale: 0.96 } : { opacity: 0, scale: 0.96 }}
           animate={{ opacity: 1, scale: 1 }}
           transition={reduceMotion ? { duration: 0.15, ease: "easeOut" } : spring.moderate}
@@ -142,7 +146,8 @@ export function FigureLightbox({
               className={cn(typeClass("caption"), "min-w-0 truncate text-foreground")}
               style={{ fontVariationSettings: fontWeights.semibold }}
             >
-              {figure.caption || `Figure on page ${figure.page}`}
+              {figure.caption ||
+                `${citeLabel(figure.docId, figure.pageLabel ?? null, figure.chapter ?? null, figure.standard ?? figure.chapter ?? null, figure.sheetOf ?? null, figure.sheetCount ?? null)} figure`}
             </span>
             <Button
               type="button"
@@ -161,7 +166,10 @@ export function FigureLightbox({
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src={figure.figureUrl}
-              alt={figure.caption || `ESR figure on page ${figure.page}`}
+              alt={
+                figure.caption ||
+                `${MANUALS[figure.docId].code} figure on ${figure.page}`
+              }
               className="h-full w-full object-contain"
             />
           </div>

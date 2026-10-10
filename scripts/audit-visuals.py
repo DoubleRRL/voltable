@@ -41,7 +41,7 @@ SKIP_CODE_PREFIXES = ("note",)
 
 FOOTER_RE = re.compile(r"EFFECTIVE DATE|^\s*PAGE\s+\d", re.IGNORECASE)
 
-DB = sys.argv[1] if len(sys.argv) > 1 else "data/esr.sqlite"
+DB = sys.argv[1] if len(sys.argv) > 1 else "data/manuals.sqlite"
 
 UNIT_MAP = {
     "inch": "in", "inches": "in", "in": "in", '"': "in",

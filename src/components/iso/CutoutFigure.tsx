@@ -14,99 +14,167 @@ import {
 import { field, parts, veil, type Transition } from "./scatter";
 import { ScatterBox } from "./ScatterBox";
 
-const ARM: Box3 = { x: 40, y: 100, z: 120, w: 120, d: 12, h: 10 };
-const INS_A: Box3 = { x: 56, y: 100, z: 130, w: 12, d: 12, h: 14 };
-const INS_B: Box3 = { x: 132, y: 100, z: 130, w: 12, d: 12, h: 14 };
-const TUBE: Box3 = { x: 80, y: 100, z: 80, w: 10, d: 10, h: 40 };
-const ARRESTER: Box3 = { x: 120, y: 100, z: 84, w: 14, d: 14, h: 36 };
+/**
+ * Branch fusing on a covered-conductor arm, after DOH CC 131-1.
+ *
+ * The two devices hang off the arm on standoff brackets, 18" minimum from the
+ * pole centreline, and they are not the same object: the fuse holder is a
+ * hinged link between two insulator stacks, and the arrester is a single
+ * ribbed column. Drawing them as one similar box is what made the earlier
+ * figure unreadable.
+ */
+const POLE: Box3 = { x: 118, y: 92, z: 0, w: 18, d: 18, h: 146 };
+const ARM: Box3 = { x: 22, y: 90, z: 112, w: 112, d: 14, h: 10 };
 
-// Jumper from the fuse tube top over to the arrester top.
+/** Line-side insulator of the fuse holder. */
+const CUT_TOP: Box3 = { x: 30, y: 92, z: 118, w: 14, d: 14, h: 26 };
+
+/** Fuse holder body: the link swings inside this, hinged at the top. */
+const HOLDER: Box3 = { x: 30, y: 92, z: 88, w: 14, d: 14, h: 30 };
+
+/** Load-side insulator of the fuse holder. */
+const CUT_BOT: Box3 = { x: 30, y: 92, z: 58, w: 14, d: 14, h: 30 };
+
+/** Surge arrester: one ribbed column, not a stack of two. */
+const ARRESTER: Box3 = { x: 72, y: 92, z: 52, w: 16, d: 16, h: 62 };
+
+/** Standoff brackets carrying each device off the arm. */
+const BRACKET_CUT: Box3 = { x: 28, y: 90, z: 112, w: 18, d: 12, h: 8 };
+const BRACKET_ARR: Box3 = { x: 70, y: 90, z: 112, w: 20, d: 12, h: 8 };
+
+/**
+ * The bypass jumper: line side down through the holder to the load side, with
+ * the arc-follower loop bridging the two so the fuse can be worked hot. CC 131
+ * Note 6 puts line on the top of the holder and load on the bottom, which is
+ * what makes the loop read as a bridge rather than a second run.
+ */
 const JUMPER_PTS: Vec3[] = curve(
-  [85, 105, 120],
-  [95, 105, 128],
-  [115, 105, 128],
-  [127, 105, 120],
+  [34, 96, 146],
+  [8, 104, 128],
+  [4, 106, 74],
+  [34, 96, 30],
 );
 const JUMPER_PATH = makePath(JUMPER_PTS);
 
-const CUTOUT_BOXES = [ARM, INS_A, INS_B, TUBE, ARRESTER];
-const CUTOUT_FIELD = field(CUTOUT_BOXES, JUMPER_PTS);
+const CUT_BOXES = [POLE, ARM, BRACKET_CUT, CUT_TOP, HOLDER, CUT_BOT, BRACKET_ARR, ARRESTER];
+const CUT_FIELD = field(CUT_BOXES, JUMPER_PTS);
+
+/** Sheds on an insulator: horizontal ribs, tighter toward the top. */
+const SHEDS = (count: number, width: number) =>
+  Array.from({ length: count }, (_, i) => `M0 ${3 + i * 4}H${width}`).join(" ");
 
 /**
- * Cutout and arrester: a crossarm carrying two insulators, a near-vertical
- * fuse tube between them, and a skirted arrester cylinder, with a jumper
- * arcing from tube top to arrester top. (The kit's boxes are axis-aligned, so
- * the tube stands vertical the way some cutouts mount, and the jumper is a
- * drawn curve.) Pressing flashes the tube's top contact; the flash is the
- * whole output.
+ * Fuse cutout and surge arrester on a covered-conductor arm.
+ *
+ * CC 131-1: the fuse holder on the load side, line into the top of the holder
+ * and load out of the bottom, with the jumper looping the two; the arrester
+ * beside it on its own bracket. Note 6 is the reason the holder is drawn with
+ * its line end up. Pressing flashes the holder's latch; the flash is the whole
+ * output.
  */
 export function CutoutFigure({ transition }: { transition?: Transition }) {
   const [pulses, setPulses] = useState(0);
 
-  const N = 5;
-  const at = transition ? parts(CUTOUT_FIELD, transition) : null;
+  const N = 8;
+  const at = transition ? parts(CUT_FIELD, transition) : null;
   const wireVeil = transition ? veil(transition.progress, transition.phase === "out") : 1;
 
-  const wires = <path className="ik-line" d={JUMPER_PATH} />;
+  const wires = (
+    <g>
+      {/* Line in at the top of the holder, load out at the bottom: CC 131
+          Note 6. The jumper is the C that bridges the two, which is what lets
+          the fuse be worked without dropping the branch. */}
+      <path className="ik-line" d="M0 96H37" />
+      <path className="ik-line" d="M37 96V30" />
+      <path className="ik-line" d="M37 30H96" />
+      <path className="ik-line" d={JUMPER_PATH} />
+    </g>
+  );
 
   return (
     <Plate
-      label="Cutout and arrester"
+      label="Fuse cutout and surge arrester"
       aspect={1}
-      fit={[...CUTOUT_BOXES, ...JUMPER_PTS]}
+      fit={[...CUT_BOXES, ...JUMPER_PTS]}
       theme="system"
       className="iso-figure iso-cutout"
     >
-      <ScatterBox at={at} rest={ARM} index={0} count={N}
-        r={4}
+      <ScatterBox at={at} rest={POLE} index={0} count={N}
+        r={7}
+        top={<circle className="ik-detail" cx={10} cy={10} r={7} />}
         front={
           <>
-            <circle className="ik-fill" cx={20} cy={5} r={1.4} />
-            <circle className="ik-fill" cx={100} cy={5} r={1.4} />
+            <path className="ik-detail" d="M5 8V140 M13 8V140" />
+            {/* HIGH VOLTAGE sign, which CC 131-1 shows between the devices. */}
+            <rect className="ik-detail" x={2} y={82} width={14} height={10} rx={1} />
           </>
         }
       />
-      <ScatterBox at={at} rest={INS_A} index={1} count={N} r={3} />
-      <ScatterBox at={at} rest={INS_B} index={2} count={N} r={3} />
+      <ScatterBox at={at} rest={ARM} index={1} count={N} r={3}
+        top={<path className="ik-detail" d="M6 6H128" />}
+      />
+      <ScatterBox at={at} rest={BRACKET_CUT} index={2} count={N} r={2}
+        front={<path className="ik-detail" d="M1 4H17" />}
+      />
+      {/* Line-side insulator: sheds tapering up toward the line. */}
+      <ScatterBox at={at} rest={CUT_TOP} index={3} count={N} r={3}
+        front={
+          <>
+            <path className="ik-detail" d={SHEDS(5, 14)} />
+            <path className="ik-detail" d="M7 -3V0 M7 26V30" />
+          </>
+        }
+      />
+      <ScatterBox at={at} rest={BRACKET_ARR} index={4} count={N} r={2}
+        front={<path className="ik-detail" d="M1 4H19" />}
+      />
+      {/* Arrester: a single ribbed column, sheds of even length. */}
+      <ScatterBox at={at} rest={ARRESTER} index={5} count={N} r={3}
+        front={
+          <>
+            <path className="ik-detail" d={SHEDS(13, 16)} />
+            {/* Studs top and bottom, as the CC 131-1 inset shows. */}
+            <path className="ik-detail" d="M8 -4V0 M8 62V66" />
+          </>
+        }
+      />
+      <ScatterBox at={at} rest={CUT_BOT} index={6} count={N} r={3}
+        front={
+          <>
+            <path className="ik-detail" d={SHEDS(6, 14)} />
+            <path className="ik-detail" d="M7 0V3 M7 30V34" />
+          </>
+        }
+      />
       <Press
-        label="Flash the fuse contact"
+        label="Flash the fuse holder latch"
         sound={false}
-        onPress={() => setPulses((n) => n + 1)}
         disabled={transition !== undefined}
+        onPress={() => setPulses((n) => n + 1)}
       >
         <g>
-          <ScatterBox at={at} rest={TUBE} index={3} count={N}
-            r={4}
+          {/* Holder body carries the fuse link and the latch that opens it. */}
+          <ScatterBox at={at} rest={HOLDER} index={7} count={N}
+            r={3}
             front={
               <>
+                {/* The link itself, hinged at the top insulator. */}
+                <path className="ik-detail" d="M7 2L7 34" />
+                <path className="ik-detail" d="M2 2H12 M2 34H12" />
                 <rect
                   key={pulses}
                   className={pulses === 0 ? "ik-live" : "ik-live glow-target"}
-                  x={3}
-                  y={2}
-                  width={4}
-                  height={5}
-                  rx={1}
-                />
-                <rect
-                  className="ik-detail"
-                  x={3}
-                  y={31}
-                  width={4}
-                  height={5}
-                  rx={1}
+                  x={11}
+                  y={15}
+                  width={3}
+                  height={7}
+                  rx={1.5}
                 />
               </>
             }
           />
         </g>
       </Press>
-      <ScatterBox at={at} rest={ARRESTER} index={4} count={N}
-        r={7}
-        front={
-          <path className="ik-detail" d="M2 8H12 M2 16H12 M2 24H12" />
-        }
-      />
       {transition ? <g opacity={wireVeil}>{wires}</g> : wires}
     </Plate>
   );
