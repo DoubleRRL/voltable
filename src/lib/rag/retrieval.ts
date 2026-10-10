@@ -3,12 +3,14 @@ import {
   expandShorthand,
   ftsQueryTokens,
   getAssetsForChunkIds,
+  getManualAffinity,
   getChunksByPairGroup,
   getShortTextChunksByPages,
   getStoredChunksByIds,
   searchChunksFts,
 } from "@/lib/rag/storage";
 import { getAppConfig } from "@/lib/env";
+import { manualsNamedIn } from "@/lib/rag/docs";
 
 export { getAssetsForChunkIds };
 
@@ -215,6 +217,13 @@ const PRIOR_NARRATIVE = 0.03;
 /** Boost for a normative rule with a number, on approval questions only. */
 const PRIOR_RULE = 0.08;
 
+/**
+ * No manual affinity known — used where a chunk is placed by its relationship
+ * to another (a legend beside its table) rather than chosen on its own merits.
+ * Absent a prior, no discount applies.
+ */
+const NO_MANUAL_PRIOR = new Map<string, number>();
+
 /** Approval-seeking phrasing: the answer is a permission, not a value. */
 const APPROVAL_PATTERN =
   /\bapprov|\ballowed\b|\bpermitted\b|\bcan i\b|\bmay i\b|\bacceptable\b|\bapproved\b/i;
@@ -252,10 +261,23 @@ const sectionMatchScore = (section: string | null | undefined, contentTokens: st
 
 type Scored = { chunk: StoredChunk; score: number; confidence: number; bm25: number; coverage: number };
 
+/**
+ * Multiplier applied to a chunk in a manual the question is not about.
+ *
+ * Soft, not a filter: a question that genuinely spans manuals still gets its
+ * evidence, it just has to earn it. A hard filter would break the questions
+ * that legitimately need two.
+ */
+const MANUAL_DISCOUNT = 0.55;
+
+/** A manual needs at least this share of the best manual's hits to be "in play". */
+const MANUAL_IN_PLAY = 0.45;
+
 const scoreChunk = (
   chunk: StoredChunk,
   intent: QueryIntent,
-  bm25ById: Map<string, number>
+  bm25ById: Map<string, number>,
+  manualPrior: Map<string, number>
 ): Scored => {
   // Coverage reads the section heading together with the text. A chunk's
   // heading is part of its meaning — citations already display it for exactly
@@ -291,6 +313,15 @@ const scoreChunk = (
     score += PRIOR_RULE;
   }
   score += sectionMatchScore(chunk.section, intent.contentTokens);
+
+  // Manual prior, applied last so it discounts a whole manual rather than one
+  // term of it. `confidence` is deliberately untouched: the notCovered gate is
+  // about whether the corpus says anything, and a discount is a statement about
+  // *which* corpus, not about coverage.
+  const prior = manualPrior.get(chunk.docId);
+  if (prior !== undefined && prior < MANUAL_IN_PLAY) {
+    score *= MANUAL_DISCOUNT;
+  }
 
   return { chunk, score, confidence, bm25: bm25 ?? Number.NaN, coverage };
 };
@@ -342,6 +373,28 @@ export const retrieveChunks = async (
     return empty;
   }
 
+  // Which manual is this question about? Computed from a grouped FTS pass over
+  // a wider slice than the candidates use, so a manual that answers well but
+  // ranks low on blended score still gets its say.
+  const affinityRows = getManualAffinity(question);
+  const manualPrior = new Map<string, number>();
+  if (affinityRows.length > 1) {
+    const best = Math.max(...affinityRows.map((r) => r.hits)) || 1;
+    for (const row of affinityRows) {
+      manualPrior.set(row.docId, row.hits / best);
+    }
+  }
+  // A manual the question names by name or acronym is in play whatever the
+  // lexical spread says, and every other manual is discounted from in-play to
+  // out. This is the difference between "the ESR specifies" as a stated
+  // constraint and as four letters the tokenizer happens to drop.
+  const named = manualsNamedIn(question);
+  if (named.length > 0) {
+    for (const id of manualPrior.keys()) {
+      manualPrior.set(id, named.includes(id as never) ? 1 : 0);
+    }
+  }
+
   const bm25ById = new Map(ftsHits.map((h) => [h.chunkId, h.bm25]));
 
   const chunks = getStoredChunksByIds(ftsHits.map((h) => h.chunkId));
@@ -350,7 +403,7 @@ export const retrieveChunks = async (
   }
 
   const scored = chunks
-    .map((chunk) => scoreChunk(chunk, intent, bm25ById))
+    .map((chunk) => scoreChunk(chunk, intent, bm25ById, manualPrior))
     .sort((a, b) => b.score - a.score);
 
   // Pull in the assets attached to the strongest chunks so an answer that
@@ -364,7 +417,7 @@ export const retrieveChunks = async (
   ].filter((id) => !known.has(id));
 
   const extras = getStoredChunksByIds(extraIds).map((chunk) =>
-    scoreChunk(chunk, intent, bm25ById)
+    scoreChunk(chunk, intent, bm25ById, manualPrior)
   );
 
   const mergedBase = [...scored, ...extras]
@@ -580,7 +633,7 @@ export const retrieveChunks = async (
       if (winner) droppedIds.add(winner.chunk.id);
       if (winner.fresh) {
         out.push({
-          ...scoreChunk(winner.chunk, intent, bm25ById),
+          ...scoreChunk(winner.chunk, intent, bm25ById, NO_MANUAL_PRIOR),
           score: anchorScore - 0.0005,
         });
       } else {
@@ -599,7 +652,10 @@ export const retrieveChunks = async (
         ...(freshByPage.get(`${group.table.docId}:${group.page}`) ?? []).map((legend) => ({
           key: legend.id,
           text: legend.text,
-          make: (score: number) => ({ ...scoreChunk(legend, intent, bm25ById), score }),
+          make: (score: number) => ({
+            ...scoreChunk(legend, intent, bm25ById, NO_MANUAL_PRIOR),
+            score,
+          }),
         })),
         ...(movingByGroup.get(group) ?? []).map((moved) => ({
           key: moved.chunk.id,

@@ -83,7 +83,12 @@ ESR, ADS and UGS — 1,207 pages, 10,141 chunks, 2,326 assets:
 | Figure crops + page renders, as rendered | 2,342 MB PNG |
 | After lossless WebP at display size, redundant page renders dropped | 544 MB |
 | One-page derivatives (574 figure pages) | 177 MB of that |
-| Final app bundle, no PDFs | **674 MB**, evidence 510 MB against a 600 MB budget |
+| PLM added (248 pages, 591 assets) | evidence 613 MB |
+| DOH added (1,126 pages) | pending — layout still running |
+
+The evidence budget is 1,200 MB, set from that measurement rather than guessed.
+Its job is to catch *unnoticed* growth — PNG masters creeping back in, a manual
+indexed twice — not to trim real evidence to hit a number nobody re-derived.
 
 Two decisions came out of measuring rather than reasoning:
 

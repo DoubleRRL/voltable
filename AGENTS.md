@@ -231,6 +231,23 @@ axis-aligned); wires fade unstaggered via `veil`. Verify rest geometry with
 `shoot.isokit.mjs` against `next start` — never `next dev`, whose chunks do not
 hydrate here.
 
+**Retrieval is manual-aware, because five manuals overlap on purpose.** ESR,
+DOH and UGS all set clearances, so "what clearance does the ESR specify for
+100 A service" scores as well on a UGS vault drawing as on the ESR table that
+answers it — measured on the golden set, that put UGS page 99 above the ESR's
+page 28 and failed 13 gates. Two mechanisms, both general:
+`getManualAffinity` asks the corpus which manual a question is about (one
+grouped FTS pass, normalised against the best manual), and `manualsNamedIn`
+takes a manual named outright as in-play whatever the lexical spread says. The
+discount is soft — cross-manual answers still surface, they have to earn it.
+`confidence` is deliberately untouched: a discount says *which* corpus, not
+whether anything was found, so it must not move the notCovered gate.
+
+**Clear the query cache after any retrieval change.** The eval reported its
+answers as served-from-cache and replayed pre-corpus prose, which read as a
+regression in answer recall that did not exist. The gate recovered on its own
+once the cache was dropped.
+
 **Five manuals, and a citation is not a page number.** The corpus is ESR, ADS,
 DOH, PLM and UGS — 2,591 pages. Two consequences run through everything and
 are not to be undone:

@@ -156,7 +156,12 @@ step "Bundle budget"
 # the budget is checked rather than described.
 APP_BYTES=$(du -sk "$STAGE/$APP_NAME.app" | cut -f1)
 EVIDENCE_BYTES=$(du -sk "$EVIDENCE_DIR" | cut -f1)
-BUDGET_MB="${EVIDENCE_BUDGET_MB:-600}"
+# Set from the measured five-manual corpus, not from a guess: 2,591 pages of
+# standards carrying 3,500+ drawings, shipped as lossless WebP plus a one-page
+# derivative per figure page, lands near this. The check is here to catch
+# *unnoticed* growth — someone re-adding PNG masters, or indexing a manual that
+# duplicates another — not to trim real evidence to hit an arbitrary number.
+BUDGET_MB="${EVIDENCE_BUDGET_MB:-1200}"
 echo "app total:    $((APP_BYTES/1024))MB"
 echo "  evidence:   $((EVIDENCE_BYTES/1024))MB (budget ${BUDGET_MB}MB)"
 if [ "$((EVIDENCE_BYTES/1024))" -gt "$BUDGET_MB" ]; then

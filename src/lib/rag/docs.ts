@@ -163,6 +163,40 @@ export const citeLabel = (
   return printedPage ? `${m.code} ${printedPage}` : m.code;
 };
 
+/**
+ * Vocabularies that name a manual outright.
+ *
+ * A planner who writes "what clearance does the ESR specify" is telling us
+ * which corpus they mean, and the ESR says ESR on every page. Ignoring that and
+ * ranking purely on lexical overlap put a UGS vault drawing above the ESR table
+ * that answers the question, because the question's real content is
+ * "clearance" and five manuals set clearances.
+ *
+ * The code alone is not enough — the manuals are addressed by name as often as
+ * by acronym — so each manual also carries the distinctive words of its title.
+ * Deliberately generic: this is the corpus answering to its own name, not a
+ * rule per question.
+ */
+const NAME_WORDS: Record<ManualId, string[]> = {
+  esr: ["esr", "service requirements", "electrical service"],
+  ads: ["ads", "applicant distribution", "distribution design"],
+  doh: ["doh", "overhead construction", "distribution overhead"],
+  plm: ["plm", "pole loading"],
+  ugs: ["ugs", "underground structures"],
+};
+
+/** Manuals named in a question, most specific first. */
+export const manualsNamedIn = (text: string): ManualId[] => {
+  const haystack = ` ${text.toLowerCase().replace(/[^a-z0-9]+/g, " ")} `;
+  const named: ManualId[] = [];
+  for (const id of MANUAL_IDS) {
+    if (NAME_WORDS[id].some((word) => haystack.includes(` ${word} `))) {
+      named.push(id);
+    }
+  }
+  return named;
+};
+
 /** Serialisable footer rules for the Python page-facts worker. */
 export const footerRulesFor = (id: ManualId) => ({
   id,

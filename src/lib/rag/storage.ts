@@ -696,6 +696,43 @@ export type SuggestHit = {
   value: string;
 };
 
+/**
+ * How well each manual's own text matches a question, as hit counts.
+ *
+ * The corpus is five manuals and they overlap in vocabulary on purpose — ESR
+ * sets clearances, DOH sets clearances, UGS sets clearances — so a question
+ * like "what clearance, in inches, does the ESR specify for 100 A service"
+ * scores just as well on a UGS vault drawing as on the ESR table that answers
+ * it. Measured against the golden set, that put UGS page 99 above the ESR's
+ * page 28 and failed 13 gates.
+ *
+ * Rather than a hand-tuned rule per manual, this asks the corpus which manual
+ * the question is about: how many of its lexical hits land in each. It is one
+ * grouped FTS query, local, and it needs no per-manual vocabulary list to keep
+ * in sync.
+ */
+export const getManualAffinity = (
+  question: string,
+  limit = 400
+): { docId: string; hits: number }[] => {
+  const db = getDb();
+  const query = ftsQueryTokens(question);
+  if (query.length === 0) {
+    return [];
+  }
+  const rows = db
+    .prepare(
+      `SELECT c.doc_id AS docId, COUNT(DISTINCT c.id) AS hits
+         FROM chunks_fts f
+         JOIN chunks c ON c.id = f.chunk_id
+        WHERE chunks_fts MATCH ?
+        GROUP BY c.doc_id
+        ORDER BY hits DESC`,
+    )
+    .all(query.join(" OR ")) as { docId: string; hits: number }[];
+  return rows.slice(0, limit).length ? rows : [];
+};
+
 /** ESR substring / multi-token AND search for autocomplete (local SQLite). */
 export const searchChunkSuggestions = (raw: string, limit: number): SuggestHit[] => {
   const normalized = raw.trim().toLowerCase();
