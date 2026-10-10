@@ -912,8 +912,13 @@ const FTS_STOPWORDS = new Set([
  */
 const SHORTHAND: Array<[RegExp, string]> = [
   [/\bp\/l\b/gi, "property line"],
+  [/\bp\.l\./gi, "property line"],
   [/\bo\/h\b/gi, "overhead"],
+  [/\bo\.h\./gi, "overhead"],
   [/\bu\/g\b/gi, "underground"],
+  [/\bu\.g\./gi, "underground"],
+  [/\boh\b/gi, "overhead"],
+  [/\bug\b/gi, "underground"],
   [/(\d+(?:\.\d+)?)\s*['′]/g, "$1 feet"],
   [/(\d+(?:\.\d+)?)\s*["″]/g, "$1 inches"],
 ];

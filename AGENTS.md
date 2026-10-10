@@ -122,8 +122,14 @@ knowledge, then misread the row on top of it (it attached row 1's `A` to
 - Planner shorthand never reaches the tokenizer raw: `p/l` → property line,
   `o/h` → overhead, `u/g` → underground, and prime marks expand (`2'` →
   2 feet) on both the question and the chunk side, so "3'-0"" meets "3 feet"
-  on the shared token. Without this a 2-foot setback question and a property
-  line question both evaporate to nothing.
+  on the shared token. Bare `oh`/`ug` and dotted forms (`o.h.`) expand the
+  same way. Crew abbreviations ride the alias table both directions
+  (short-to-long for typed shorthand like `pri`/`sec`/`svc`/`str`/`pad`,
+  long-to-short for OCR and figure callouts that abbreviate); `str` maps to
+  structure and street both, ranking sorts out which was meant. Pole and
+  structure numbers (`pole#45218`, `str#123`) tokenize to noun plus digits —
+  the digits match nothing in the ESR today and are left intact on purpose
+  as the future GIS hook, for a tool harness to resolve against real assets.
 - Ranking is MMR (λ=0.7) over chunk-text similarity — never over matched
   question tokens, which punished a setback rule for sharing the words
   "property line" with a lateral figure stating different facts. Tables are

@@ -112,6 +112,19 @@ const UNIT_ALIASES: Record<string, string[]> = {
   pool: ["pools", "swimming"],
   pools: ["pool", "swimming"],
   swimming: ["pool", "pools"],
+  // Crew shorthand, per planner vocabulary: oh/ug/pri/sec/svc/str/pad.
+  // Short-to-long covers typed shorthand ("pri" against "primary"); the
+  // reverse covers OCR and figure callouts that abbreviate ("Pri.", "Svc.").
+  pri: ["primary"],
+  primary: ["pri"],
+  sec: ["secondary"],
+  secondary: ["sec"],
+  svc: ["service"],
+  service: ["svc"],
+  str: ["structure", "street"],
+  structure: ["str"],
+  pad: ["padmount"],
+  padmount: ["pad"],
   gauss: ["mg", "milligauss"],
   maximum: ["max", "mg", "milligauss"],
   max: ["maximum", "mg"],
