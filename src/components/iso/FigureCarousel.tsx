@@ -49,7 +49,7 @@ const FIGURES: Array<{ id: string; label: string; Component: FigureComponent }> 
   { id: "pole", label: "Distribution pole", Component: PoleFigure },
   { id: "padmount", label: "Padmount transformer", Component: PadmountFigure },
   { id: "switchgear", label: "1200 amp switchgear", Component: SwitchgearFigure },
-  { id: "meterpanel", label: "Meter panel and mast", Component: MeterPanelFigure },
+  { id: "meterpanel", label: "Meter panel and service", Component: MeterPanelFigure },
   { id: "guy", label: "Guy wire and anchor", Component: GuyAnchorFigure },
   { id: "cutout", label: "Cutout and arrester", Component: CutoutFigure },
   { id: "junction", label: "Junction cabinet", Component: JunctionCabinetFigure },

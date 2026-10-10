@@ -14,10 +14,13 @@ import {
 import { field, parts, veil, type Transition } from "./scatter";
 import { ScatterBox } from "./ScatterBox";
 
+const GRADE: Box3 = { x: 0, y: 60, z: 0, w: 180, d: 100, h: 6 };
 const POLE: Box3 = { x: 60, y: 120, z: 0, w: 20, d: 20, h: 170 };
 const COND_A: Box3 = { x: 64, y: 136, z: 0, w: 8, d: 6, h: 34 };
 const COND_B: Box3 = { x: 76, y: 136, z: 0, w: 8, d: 6, h: 26 };
 const GUARD: Box3 = { x: 60, y: 134, z: 30, w: 30, d: 8, h: 70 };
+const ROD_A: Box3 = { x: 104, y: 128, z: 6, w: 5, d: 5, h: 26 };
+const ROD_B: Box3 = { x: 118, y: 128, z: 6, w: 5, d: 5, h: 26 };
 const STRAP_LO: Box3 = { x: 58, y: 133, z: 44, w: 34, d: 10, h: 4 };
 const STRAP_HI: Box3 = { x: 58, y: 133, z: 78, w: 34, d: 10, h: 4 };
 
@@ -37,20 +40,30 @@ const SWEEP_B_PTS: Vec3[] = curve(
 const SWEEP_A_PATH = makePath(SWEEP_A_PTS);
 const SWEEP_B_PATH = makePath(SWEEP_B_PTS);
 
-const RISER_BOXES = [POLE, COND_A, COND_B, GUARD, STRAP_LO, STRAP_HI];
-const RISER_POINTS: Vec3[] = [...SWEEP_A_PTS, ...SWEEP_B_PTS];
+// Ground jumper from the guard bottom over to the first rod top.
+const GND_PTS: Vec3[] = curve(
+  [75, 138, 30],
+  [88, 134, 32],
+  [98, 131, 32],
+  [106, 130, 32],
+);
+const GND_PATH = makePath(GND_PTS);
+
+const RISER_BOXES = [GRADE, POLE, COND_A, COND_B, GUARD, ROD_A, ROD_B, STRAP_LO, STRAP_HI];
+const RISER_POINTS: Vec3[] = [...SWEEP_A_PTS, ...SWEEP_B_PTS, ...GND_PTS];
 const RISER_FIELD = field(RISER_BOXES, RISER_POINTS);
 
 /**
- * Riser and U-guard: a pole base with two conduits climbing its face into a
- * cover strip strapped on with two bands, sweeps bending from the conduit
- * tops back into the pole. Pressing flashes a strap bolt; the flash is the
+ * Riser and U-guard: a pole rising out of the grade with two conduits
+ * climbing its face into a cover strip strapped on with two bands, sweeps
+ * bending from the conduit tops back into the pole, and ground rods with a
+ * jumper from the guard. Pressing flashes a strap bolt; the flash is the
  * whole output.
  */
 export function RiserFigure({ transition }: { transition?: Transition }) {
   const [pulses, setPulses] = useState(0);
 
-  const N = 6;
+  const N = 9;
   const at = transition ? parts(RISER_FIELD, transition) : null;
   const wireVeil = transition ? veil(transition.progress, transition.phase === "out") : 1;
 
@@ -58,6 +71,7 @@ export function RiserFigure({ transition }: { transition?: Transition }) {
     <>
       <path className="ik-line" d={SWEEP_A_PATH} />
       <path className="ik-line" d={SWEEP_B_PATH} />
+      <path className="ik-line" d={GND_PATH} />
     </>
   );
 
@@ -69,19 +83,30 @@ export function RiserFigure({ transition }: { transition?: Transition }) {
       theme="system"
       className="iso-figure iso-riser"
     >
-      <ScatterBox at={at} rest={POLE} index={0} count={N}
-        r={4}
+      <ScatterBox at={at} rest={GRADE} index={0} count={N}
+        r={2}
+        top={
+          <path className="ik-detail" d="M20 20l10 -10 M50 20l10 -10 M80 20l10 -10 M110 20l10 -10 M140 20l10 -10" />
+        }
+      />
+      <ScatterBox at={at} rest={POLE} index={1} count={N}
+        r={6}
+        top={
+          <circle className="ik-detail" cx={10} cy={10} r={7} />
+        }
         front={<path className="ik-detail" d="M6 6V164 M14 6V164" />}
       />
-      <ScatterBox at={at} rest={COND_A} index={1} count={N} r={2} />
-      <ScatterBox at={at} rest={COND_B} index={2} count={N} r={2} />
-      <ScatterBox at={at} rest={GUARD} index={3} count={N}
+      <ScatterBox at={at} rest={COND_A} index={2} count={N} r={2} />
+      <ScatterBox at={at} rest={COND_B} index={3} count={N} r={2} />
+      <ScatterBox at={at} rest={GUARD} index={4} count={N}
         r={2}
         front={
           <path className="ik-detail" d="M4 8V62 M26 8V62" />
         }
       />
-      <ScatterBox at={at} rest={STRAP_LO} index={4} count={N} r={1} />
+      <ScatterBox at={at} rest={ROD_A} index={5} count={N} r={1} />
+      <ScatterBox at={at} rest={ROD_B} index={6} count={N} r={1} />
+      <ScatterBox at={at} rest={STRAP_LO} index={7} count={N} r={1} />
       <Press
         label="Flash the strap bolt"
         sound={false}
@@ -89,7 +114,7 @@ export function RiserFigure({ transition }: { transition?: Transition }) {
         disabled={transition !== undefined}
       >
         <g>
-          <ScatterBox at={at} rest={STRAP_HI} index={5} count={N}
+          <ScatterBox at={at} rest={STRAP_HI} index={8} count={N}
             r={1}
             front={
               <circle

@@ -125,6 +125,8 @@ const UNIT_ALIASES: Record<string, string[]> = {
   structure: ["str"],
   pad: ["padmount"],
   padmount: ["pad"],
+  eqmt: ["equipment"],
+  equipment: ["eqmt"],
   gauss: ["mg", "milligauss"],
   maximum: ["max", "mg", "milligauss"],
   max: ["maximum", "mg"],

@@ -132,9 +132,9 @@ knowledge, then misread the row on top of it (it attached row 1's `A` to
   2 feet) on both the question and the chunk side, so "3'-0"" meets "3 feet"
   on the shared token. Bare `oh`/`ug` and dotted forms (`o.h.`) expand the
   same way. Crew abbreviations ride the alias table both directions
-  (short-to-long for typed shorthand like `pri`/`sec`/`svc`/`str`/`pad`,
-  long-to-short for OCR and figure callouts that abbreviate); `str` maps to
-  structure and street both, ranking sorts out which was meant. Pole and
+  (short-to-long for typed shorthand like `pri`/`sec`/`svc`/`str`/`pad`/
+  `eqmt`, long-to-short for OCR and figure callouts that abbreviate); `str`
+  maps to structure and street both, ranking sorts out which was meant. Pole and
   structure numbers (`pole#45218`, `str#123`) tokenize to noun plus digits —
   the digits match nothing in the ESR today and are left intact on purpose
   as the future GIS hook, for a tool harness to resolve against real assets.
@@ -197,15 +197,29 @@ seeking. Frames are scheduled only while a flight is live.
 Contract for figure files: accept an optional `transition` prop
 (`{ progress, phase }`); build a `Field` once at module scope with `field()`,
 pass it to `parts()` each frame, and render boxes through `ScatterBox`. The
-carousel owns only timing. Dots are inert mid-flight, presses disabled
-mid-flight, and `beginFlight` parks focus on the region before anything moves —
-without that, a keyboard user who tabs to the dots leaves `paused` true and
-freezes a half-scattered figure on screen indefinitely. Pausing freezes the
+carousel owns only timing. There are no dots: with ten figures the strip
+reads as clutter, so rotation is dwell-only and the sr-only live region still
+announces each figure. Presses are inert mid-flight (each figure disables its
+Press whenever `transition` is defined), and `beginFlight` parks focus on the
+region before anything moves. Pausing freezes the
 timeline rather than cancelling it. One figure at a time at ~200px
 (`FigureCarousel`), pausing on hover and on focus-within. Under reduced motion
-the carousel never mounts — the static three-up row renders instead so every
-figure stays reachable with zero motion. Empty state only; the conversation
-view never shows figures unasked.
+the carousel never mounts — the static wrapped row renders instead so every
+figure stays reachable with zero motion (a `useSyncExternalStore` mount guard
+keeps SSR and first client render identical, or React 418s). Empty state only;
+the conversation view never shows figures unasked.
+
+**Figure accuracy comes from the manual, not from memory.** Every equipment
+figure is drawn against the ESR's own drawings (`public/figures/fig-p*-0.png`):
+round poles with grain caps, meter boards on posts with burial, risers with
+sweeps into grade plus ground rods, guys as taut wire to a rodded anchor with
+a guard. The scheme contract per figure file: one `Plate`, a module-scope
+`field()`, `ScatterBox` parts numbered in paint order with staggered indices,
+SVG `path` face details only, exactly one `Press` whose sole output is a glow
+flash, disabled while `transition` is defined, own `--chapter-hue`. Diagonals
+are drawn curves (boxes are axis-aligned); wires fade unstaggered via `veil`.
+Verify rest geometry with `shoot.isokit.mjs` against `next start` — never
+`next dev`, whose chunks do not hydrate here.
 
 **The composer is a pill that opens, not a box.** The resting empty-state
 field is 163×~59px of placeholder ("Ask away") — barely bigger than the text.
