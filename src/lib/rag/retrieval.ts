@@ -1,5 +1,6 @@
 import type { RetrievalResult, StoredChunk } from "@/lib/rag/types";
 import {
+  expandShorthand,
   ftsQueryTokens,
   getAssetsForChunkIds,
   getChunksByPairGroup,
@@ -46,7 +47,7 @@ const tokenize = (value: string) =>
  *     numeric question is a visual question far more often than not.
  */
 const UNIT_TAIL =
-  /\d\s*(?:ft|feet|foot|in|inches|inch|"|'|v|volt|volts|amp|amps|amperes|a\b|phase|ph\b|kv|kw|mva|ohm|ohms|%|percent|mg|gauss|hertz|hz|days?|months?|years?|hours?)\b/;
+  /\d\s*(?:ft|feet|foot|in|inches|inch|"|'|v|volt|volts|amp|amps|amperes|a\b|phase|ph\b|kv|kw|mva|ohm|ohms|%|percent|mg|gauss|hertz|hz|days?|months?|years?|hours?)(?![a-z0-9])/;
 
 const FIGURE_WORDS = [
   "figure", "figures", "fig", "diagram", "table", "chart", "drawing", "drawn", "image",
@@ -56,6 +57,8 @@ const FIGURE_WORDS = [
 export type QueryIntent = {
   /** Question asks for a figure/table or a measured value. */
   visualIntent: boolean;
+  /** Question asks permission (approve/allowed/can I) — answered by rules. */
+  approvalIntent: boolean;
   /** Which trigger fired, for display and debugging. */
   trigger: "figure-word" | "measurement" | "visual-first" | "none";
   tokens: string[];
@@ -67,18 +70,19 @@ export const analyzeQuery = (question: string, visualFirst = false): QueryIntent
   const lowered = question.toLowerCase();
   const contentTokens = ftsQueryTokens(question);
   const tokens = tokenize(question);
+  const approvalIntent = APPROVAL_PATTERN.test(question);
 
   const figureWord = FIGURE_WORDS.find((w) => lowered.includes(w));
   if (figureWord) {
-    return { visualIntent: true, trigger: "figure-word", tokens, contentTokens };
+    return { visualIntent: true, approvalIntent, trigger: "figure-word", tokens, contentTokens };
   }
   if (UNIT_TAIL.test(lowered)) {
-    return { visualIntent: true, trigger: "measurement", tokens, contentTokens };
+    return { visualIntent: true, approvalIntent, trigger: "measurement", tokens, contentTokens };
   }
   if (visualFirst) {
-    return { visualIntent: true, trigger: "visual-first", tokens, contentTokens };
+    return { visualIntent: true, approvalIntent, trigger: "visual-first", tokens, contentTokens };
   }
-  return { visualIntent: false, trigger: "none", tokens, contentTokens };
+  return { visualIntent: false, approvalIntent, trigger: "none", tokens, contentTokens };
 };
 
 /**
@@ -169,7 +173,9 @@ const tokenizeWithSymbols = (value: string) => {
 /** Fraction of the question's distinctive tokens present in a chunk's text. */
 const coverageOf = (chunkText: string, contentTokens: string[]) => {
   if (contentTokens.length === 0) return 0;
-  const haystack = new Set(tokenizeWithSymbols(chunkText));
+  // Same shorthand expansion as the question side, so "3'-0"" in a chunk
+  // meets "2 feet" in a question on the shared token "feet".
+  const haystack = new Set(tokenizeWithSymbols(expandShorthand(chunkText)));
   const needles = [...contentTokens, ...aliasTokens(contentTokens)];
   let hits = 0;
   for (const token of needles) {
@@ -191,6 +197,20 @@ const W_SECTION = 0.12;
 const PRIOR_TABLE = 0.06;
 const PRIOR_FIGURE = 0.08;
 const PRIOR_NARRATIVE = 0.03;
+/** Boost for a normative rule with a number, on approval questions only. */
+const PRIOR_RULE = 0.08;
+
+/** Approval-seeking phrasing: the answer is a permission, not a value. */
+const APPROVAL_PATTERN =
+  /\bapprov|\ballowed\b|\bpermitted\b|\bcan i\b|\bmay i\b|\bacceptable\b|\bapproved\b/i;
+
+/** Normative language plus a measurement — a rule that settles permission. */
+const RULE_PATTERN =
+  /\b(shall not|must not|shall|must|required|minimum|prohibited)\b/i;
+// Digits or spelled-out numbers: spec prose writes "three feet" as often as
+// "3 feet", and the rule test must see both.
+const RULE_MEASURE_PATTERN =
+  /(\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\s*(inches|inch|feet|foot|volts|volt|amps|ampere|amperes|amp|percent|pct|%|in\b|ft\b|["'′″])/i;
 
 /**
  * Minimum top-1 token coverage for the ESR to be considered to cover a
@@ -246,6 +266,14 @@ const scoreChunk = (
     if (chunk.evidenceType === "table") score += PRIOR_TABLE;
     if (chunk.evidenceType === "figure") score += PRIOR_FIGURE;
     if (chunk.chunkRole === "pre_visual_narrative") score += PRIOR_NARRATIVE;
+  }
+  // Permission questions are answered by rules, not by topic matches: an
+  // "Options" chunk can outrank the setback rule on BM25 density while saying
+  // nothing about permission. A chunk that states a normative rule WITH a
+  // measurement ("shall not … less than three feet") is the shape an approval
+  // answer takes, so it ranks as one — same weight as the figure prior.
+  if (intent.approvalIntent && RULE_PATTERN.test(chunk.text) && RULE_MEASURE_PATTERN.test(chunk.text)) {
+    score += PRIOR_RULE;
   }
   score += sectionMatchScore(chunk.section, intent.contentTokens);
 
@@ -324,9 +352,73 @@ export const retrieveChunks = async (
     scoreChunk(chunk, intent, bm25ById)
   );
 
-  const merged = [...scored, ...extras]
+  const mergedBase = [...scored, ...extras]
     .sort((a, b) => b.score - a.score)
     .slice(0, config.RETRIEVAL_CANDIDATES);
+
+  // Maximal-marginal-relevance re-ranking: a later chunk that says the same
+  // thing as a higher-ranked chunk adds no new evidence, and in a top-4 slice
+  // it actively displaces chunks that do. Three near-identical "panel upgrade
+  // options" chunks once buried the working-space figure a setback question
+  // needed. Tables are exempt — structure matters, and the table pass below
+  // positions them on purpose — except glossary tables, which define terms
+  // but answer nothing. Similarity is Jaccard over the chunks' own word sets,
+  // NOT over matched question tokens: two chunks sharing the words "property
+  // line" can state different facts (a lateral figure vs a setback rule), and
+  // penalizing question-vocabulary overlap punished the rule for matching the
+  // question well. λ=0.7 keeps relevance dominant.
+  const MMR_LAMBDA = 0.7;
+  const isGlossary = (s: (typeof mergedBase)[number]): boolean =>
+    /glossar/i.test(s.chunk.section ?? "");
+  const merged = (() => {
+    // Word sets of the chunks themselves (with symbols, so dimensions count),
+    // shared with the coverage scorer's normalization.
+    const wordsById = new Map<string, Set<string>>();
+    for (const s of mergedBase) {
+      wordsById.set(s.chunk.id, new Set(tokenizeWithSymbols(expandShorthand(s.chunk.text))));
+    }
+    const remaining = [...mergedBase];
+    const out: typeof mergedBase = [];
+    const selected: Array<Set<string>> = [];
+    while (remaining.length > 0) {
+      let best = 0;
+      for (let i = 1; i < remaining.length; i += 1) {
+        const cand = remaining[i] as (typeof mergedBase)[number];
+        const cur = remaining[best] as (typeof mergedBase)[number];
+        // Max similarity to any selected chunk: a duplicate of one selected
+        // chunk is redundant even when the rest of the selection differs.
+        const simOf = (id: string): number => {
+          const cov = wordsById.get(id) ?? new Set<string>();
+          if (cov.size === 0) return 0;
+          let m = 0;
+          for (const s of selected) {
+            if (s.size === 0) continue;
+            let inter = 0;
+            for (const t of cov) {
+              if (s.has(t)) inter += 1;
+            }
+            m = Math.max(m, inter / (cov.size + s.size - inter));
+          }
+          return m;
+        };
+        const simCand =
+          cand.chunk.chunkType === "table" && !isGlossary(cand) ? 0 : simOf(cand.chunk.id);
+        const simCur =
+          cur.chunk.chunkType === "table" && !isGlossary(cur) ? 0 : simOf(cur.chunk.id);
+        if (
+          MMR_LAMBDA * cand.score - (1 - MMR_LAMBDA) * simCand >
+          MMR_LAMBDA * cur.score - (1 - MMR_LAMBDA) * simCur
+        ) {
+          best = i;
+        }
+      }
+      const [pick] = remaining.splice(best, 1);
+      const picked = pick as (typeof mergedBase)[number];
+      out.push(picked);
+      selected.push(wordsById.get(picked.chunk.id) ?? new Set<string>());
+    }
+    return out;
+  })();
 
   // Tables travel with their key and their legend. Two retrieval gaps conspire
   // against table questions. First, the clean markdown table often loses to
@@ -379,11 +471,20 @@ export const retrieveChunks = async (
     merged.forEach((s, i) => {
       let table: StoredChunk | null = null;
       let ocrId: string | null = null;
-      if (s.chunk.chunkType === "table") {
+      // Glossary tables define terms; they anchor no group and attach no
+      // legend. Letting one anchor once floated glossary above the setback
+      // rule the question needed, and attached footnotes to a definition.
+      const glossaried = (c: StoredChunk): boolean => /glossar/i.test(c.section ?? "");
+      if (s.chunk.chunkType === "table" && !glossaried(s.chunk)) {
         table = s.chunk;
       } else if (s.chunk.pairGroupId) {
         const head = heads.get(s.chunk.pairGroupId);
-        if (head && head.chunkType === "table" && head.id !== s.chunk.id) {
+        if (
+          head &&
+          head.chunkType === "table" &&
+          head.id !== s.chunk.id &&
+          !glossaried(head)
+        ) {
           table = head;
           ocrId = s.chunk.id;
         }
@@ -519,7 +620,33 @@ export const retrieveChunks = async (
   const coverage = top?.coverage ?? 0;
   // Coverage of the best chunk is the gate; confidence is reported alongside it
   // but is a weaker out-of-scope signal (see NOT_COVERED_THRESHOLD).
-  const notCovered = merged.length === 0 || coverage < NOT_COVERED_THRESHOLD;
+  //
+  // Multi-facet questions get a second chance: when no single chunk clears
+  // the bar but the top slice jointly covers the question around a
+  // substantive anchor, the corpus answers it. "Can I approve a panel upgrade
+  // 2' from the property line" splits across upgrade framing (approve/panel)
+  // and setback substance (feet/property/line) — no one chunk holds both, so
+  // the top-1 gate failed an answerable question. The anchor floor keeps four
+  // quarter-matching scraps from passing as a set.
+  const gateSlice = withLegends.slice(0, config.RETRIEVAL_TOP_K);
+  const jointHit = new Set<string>();
+  let jointMax = 0;
+  if (intent.contentTokens.length > 0) {
+    const needles = [...intent.contentTokens, ...aliasTokens(intent.contentTokens)];
+    for (const s of gateSlice) {
+      jointMax = Math.max(jointMax, s.coverage);
+      const hay = new Set(tokenizeWithSymbols(expandShorthand(s.chunk.text)));
+      for (const t of needles) {
+        if (hay.has(t)) jointHit.add(t);
+      }
+    }
+  }
+  const jointCoverage =
+    intent.contentTokens.length > 0 ? jointHit.size / intent.contentTokens.length : 0;
+  const notCovered =
+    merged.length === 0 ||
+    (coverage < NOT_COVERED_THRESHOLD &&
+      !(jointCoverage >= 0.7 && jointMax >= 0.35));
 
   return {
     candidates: notCovered ? [] : withLegends.slice(0, config.RETRIEVAL_TOP_K),

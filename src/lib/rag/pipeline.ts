@@ -763,6 +763,91 @@ type TableVerdict = {
   legend: RetrievalChunk;
 };
 
+/** Units the answer verifier understands, normalized so "2.5 feet" meets
+ *  "2.5 ft" but never meets "30 in" — cross-unit conversion would bless a
+ *  riser dimension as a panel setback. */
+type VerifiedMeasurement = { value: number; unit: string };
+
+const normalizeMeasureUnit = (raw: string): string | null => {
+  const u = raw.toLowerCase().replace(/\.$/, "");
+  if (["in", "inch", "inches", '"', "″"].includes(u)) return "inches";
+  if (["ft", "feet", "foot", "'", "′"].includes(u)) return "feet";
+  if (["v", "volt", "volts"].includes(u)) return "volts";
+  if (["a", "amp", "amps", "ampere", "amperes"].includes(u)) return "amps";
+  if (["%", "percent", "pct"].includes(u)) return "percent";
+  return null;
+};
+
+const parseMeasureValue = (raw: string): number | null => {
+  const s = raw.replace(/\s+/g, "");
+  if (s.includes("/")) {
+    const [a, b] = s.split("/");
+    const n = Number(a) / Number(b);
+    return Number.isFinite(n) ? n : null;
+  }
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+};
+
+const WORD_NUMBERS: Record<string, number> = {
+  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8,
+  nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14,
+  fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19,
+  twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70,
+  eighty: 80, ninety: 90,
+};
+
+const extractMeasurements = (text: string): VerifiedMeasurement[] => {
+  const re =
+    /(\d+\s*\/\s*\d+|\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)\s*(inches|inch|feet|foot|volts|volt|amps|ampere|amperes|amp|percent|pct|%|in\b|ft\b|["'′″])/gi;
+  const out: VerifiedMeasurement[] = [];
+  for (const m of text.matchAll(re)) {
+    const unit = normalizeMeasureUnit(m[2] ?? "");
+    const rawNum = (m[1] ?? "").replace(/\s+/g, "");
+    const value = /^\d/.test(rawNum) ? parseMeasureValue(rawNum) : WORD_NUMBERS[rawNum.toLowerCase()] ?? null;
+    if (unit !== null && value !== null) out.push({ value, unit });
+  }
+  return out;
+};
+
+const measureKey = (m: VerifiedMeasurement): string => `${m.value} ${m.unit}`;
+
+/**
+ * Every measurement in the answer must appear in a cited quote — same number,
+ * same unit, no cross-unit conversion. A "2.5 feet" backed only by a "30 in"
+ * riser dimension is exactly the fabrication this guards: numerically related
+ * is not cited. Numbers already present in the question are exempt (restating
+ * the ask is not a claim), and unparseable values never flag.
+ */
+const verifyAnswerNumbers = (
+  question: string,
+  answer: string,
+  directAnswer: string,
+  citations: SourceCitation[],
+): { answer: string; directAnswer: string; ok: boolean } => {
+  const asked = new Set(extractMeasurements(question).map(measureKey));
+  const quoted = new Set(
+    citations.flatMap((c) => extractMeasurements(c.quote ?? "").map(measureKey)),
+  );
+  const supported = (text: string): boolean =>
+    extractMeasurements(text).every((m) => {
+      const key = measureKey(m);
+      return asked.has(key) || quoted.has(key);
+    });
+  const headlineOk = supported(directAnswer);
+  const proseOk = supported(answer);
+  if (headlineOk && proseOk) return { answer, directAnswer, ok: true };
+  const caveat =
+    "Not every number above is stated in the cited passages — verify against the page.";
+  return {
+    answer: proseOk ? answer : `${answer} ${caveat}`,
+    // A headline number with no quote behind it is the lie by position: it is
+    // what the planner reads first. Drop it rather than soften it.
+    directAnswer: headlineOk ? directAnswer : "",
+    ok: false,
+  };
+};
+
 /**
  * Deterministic reading of a coded table cell, for questions that name the
  * row key outright ("is 301A approved?"). A small model misreads long
@@ -874,6 +959,7 @@ Rules:
 - Do not add unknown values.
 - Do not invent or list exceptions in the JSON. Exceptions are attached separately from storage.
 - When the question mentions orientation or location (front, rear, side, line side, load side, working space, radial, "in front of"), the answer and directAnswer MUST reflect that same orientation. Do not substitute a clearance that applies to a different face (e.g. rear/radial vs front/working space) unless the chunks only address one.
+- Approval questions ("can I approve", "is X allowed", "is X permitted") require a chunk that explicitly permits or prohibits X. A chunk about a nearby topic (upgrade options answering a setback question) is not permission. If the chunks state a requirement the question would violate (a 3-foot minimum where 2 feet is asked), the answer is no — never infer approval from the absence of a prohibition.
 - When a table cell is a code or single letter (e.g. A, U, C, B), interpret it ONLY through a legend or definition chunk in the context ("U = Unacceptable"). Never expand a code from prior knowledge or from the column heading alone. If no legend is present in the chunks, say the code's meaning is not stated in the retrieved passages instead of guessing.
 - Keep answer concise: exactly one short paragraph in answer; one-sentence directAnswer (roughly <= 36 words when needed for units like feet and inches).
 - If confidence is weak return a brief caveat inside answer.
@@ -1364,7 +1450,10 @@ const answerCore = async (
   }
 
   const rawCitations = parsed.citations ?? [];
-  const citations =
+  // A citation with no verifiable quote lends authority to whatever the prose
+  // claims next to it — "2.5 feet" shipped beside a quoteless row. Drop them;
+  // a missing source must read as missing, never as a blank badge of honor.
+  const citations = (
     rawCitations.length > 0
       ? rawCitations
           .map((citation) => {
@@ -1382,7 +1471,8 @@ const answerCore = async (
       : quoteSet
           .slice(0, 2)
           .map((chunk) => buildCitation(null, chunk, question))
-          .filter((entry): entry is SourceCitation => entry !== null);
+          .filter((entry): entry is SourceCitation => entry !== null)
+  ).filter((entry) => entry.quote.trim().length > 0);
 
   const exceptions = collectStoredExceptions(
     quoteSet.map((c) => c.id),
@@ -1398,6 +1488,11 @@ const answerCore = async (
   const rawDirectAnswer = parsed.directAnswer || citations[0]?.quote || "No direct answer.";
   const answer = compactToSentences(rawAnswer, 1, MAX_ANSWER_WORDS);
   const directAnswer = deriveDirectAnswer(question, rawDirectAnswer, citations, conversationPrefix);
+  // Numbers without quotes are how confident wrong answers ship ("2.5 feet"
+  // beside a quoteless row). Verify against the citations that survived: any
+  // measurement the quotes do not state caps the verdict at partial, drops a
+  // headline that states one, and says so in the prose.
+  const verified = verifyAnswerNumbers(question, answer, directAnswer, citations);
 
   let figuresOut = figures;
   if (visualFirst && quoteSet.length > 0) {
@@ -1406,12 +1501,17 @@ const answerCore = async (
   figuresOut = finalizeFigures(figuresOut, quoteSet);
 
   const response: ChatAnswer = {
-    answer,
-    directAnswer,
+    answer: verified.answer,
+    directAnswer: verified.directAnswer,
     citations,
     figures: figuresOut,
     exceptions,
-    grounding: citations.length === 0 ? "none" : citations.length >= 2 ? "esr" : "partial",
+    grounding:
+      citations.length === 0
+        ? "none"
+        : !verified.ok || citations.length < 2
+          ? "partial"
+          : "esr",
     notCovered: citations.length === 0,
     retrievalSummary: retrievalSummaryFor(
       candidates.length,

@@ -903,6 +903,32 @@ const FTS_STOPWORDS = new Set([
 ]);
 
 /**
+ * Planner shorthand, expanded before tokenizing. A question like "2' from
+ * p/l" would otherwise evaporate: the tokenizer drops "2", "p" and "l" as
+ * too short, deleting both the distance and the most distinctive noun. The
+ * same expansion runs on chunk text at scoring time, so "3'-0"" and "3 feet"
+ * meet on the same token. Slash abbreviations are standard utility
+ * shorthand, and prime marks are how every planner writes feet and inches.
+ */
+const SHORTHAND: Array<[RegExp, string]> = [
+  [/\bp\/l\b/gi, "property line"],
+  [/\bo\/h\b/gi, "overhead"],
+  [/\bu\/g\b/gi, "underground"],
+  [/(\d+(?:\.\d+)?)\s*['′]/g, "$1 feet"],
+  [/(\d+(?:\.\d+)?)\s*["″]/g, "$1 inches"],
+];
+
+export const expandShorthand = (raw: string): string => {
+  let out = raw;
+  for (const [pattern, replacement] of SHORTHAND) {
+    // Fresh regex state per call: the patterns are global and `lastIndex`
+    // would otherwise leak between questions.
+    out = out.replace(new RegExp(pattern.source, pattern.flags), replacement);
+  }
+  return out;
+};
+
+/**
  * Content tokens for FTS5 MATCH, in order, deduped.
  *
  * OR-relaxed on purpose. ANDing every token meant one misspelled or
@@ -914,7 +940,7 @@ const FTS_STOPWORDS = new Set([
 export const ftsQueryTokens = (raw: string): string[] => {
   const seen = new Set<string>();
   const tokens: string[] = [];
-  for (const part of raw.toLowerCase().split(/[^a-z0-9]+/)) {
+  for (const part of expandShorthand(raw).toLowerCase().split(/[^a-z0-9]+/)) {
     const token = part.trim();
     if (token.length < 3) continue;
     if (FTS_STOPWORDS.has(token)) continue;

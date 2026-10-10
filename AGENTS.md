@@ -102,12 +102,35 @@ knowledge, then misread the row on top of it (it attached row 1's `A` to
   exactly one row plus its legend are in context: no ~7s model call, and the
   row and legend line are quoted verbatim (the fuzzy quoter would balloon
   them to the whole table). Anything ambiguous falls through to the model.
+- Every measurement in a model answer must appear in a cited quote — same
+  number, same unit, no cross-unit conversion (a "2.5 feet" backed only by a
+  "30 in" riser dimension is fabrication, not support). Word-numbers count
+  ("three feet" meets "3'"), question-echoed numbers are exempt, unparseable
+  values never flag. A violation caps the verdict at partial, drops a headline
+  that states one, and says so in the prose. Quoteless citations are dropped
+  outright: a source with no verifiable quote lends authority to whatever the
+  prose claims next to it.
+- Approval questions require an explicitly permitting or prohibiting chunk; a
+  nearby topic is never permission, and a stated requirement the question
+  would violate means no.
 - Coverage reads the section heading with the chunk text (a table chunk is
   stripped of context at ingest — its text starts at the separator row), and
   the alias table covers approval language (approved/acceptable/
   acceptability) and pools (pool/pools/swimming) by the same precedent as the
   unit synonyms. Question filler (how/does/many/need/…) is stopped out of the
   FTS query because it only ever drags the coverage denominator.
+- Planner shorthand never reaches the tokenizer raw: `p/l` → property line,
+  `o/h` → overhead, `u/g` → underground, and prime marks expand (`2'` →
+  2 feet) on both the question and the chunk side, so "3'-0"" meets "3 feet"
+  on the shared token. Without this a 2-foot setback question and a property
+  line question both evaporate to nothing.
+- Ranking is MMR (λ=0.7) over chunk-text similarity — never over matched
+  question tokens, which punished a setback rule for sharing the words
+  "property line" with a lateral figure stating different facts. Tables are
+  exempt (glossary tables are not: they define terms but answer nothing).
+- The coverage gate has a joint alternative: top-1 below bar but top-4
+  jointly covering around an anchor still passes. Approval questions boost
+  normative rules with measurements (same weight as the figure prior).
 - A markdown table with real data rows subsumes its OCR sibling; a
   title-and-footer stub yields to the OCR flow that actually carries the
   numbers. Either way the pair costs one context slot, and short text already
