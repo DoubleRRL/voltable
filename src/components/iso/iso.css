@@ -32,6 +32,34 @@
   --chapter-hue: 90;
 }
 
+.iso-meterpanel {
+  --chapter-hue: 210;
+}
+
+.iso-guy {
+  --chapter-hue: 40;
+}
+
+.iso-cutout {
+  --chapter-hue: 150;
+}
+
+.iso-junction {
+  --chapter-hue: 300;
+}
+
+.iso-ctcabinet {
+  --chapter-hue: 180;
+}
+
+.iso-riser {
+  --chapter-hue: 20;
+}
+
+.iso-recloser {
+  --chapter-hue: 260;
+}
+
 @keyframes iso-glow {
   0% {
     opacity: 1;

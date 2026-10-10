@@ -1,16 +1,22 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import { motion, useReducedMotion } from "framer-motion";
 
 import { spring } from "@/lib/springs";
-import { cn } from "@/lib/utils";
 import { clamp01 } from "./scatter";
 
 import { PoleFigure } from "./PoleFigure";
 import { PadmountFigure } from "./PadmountFigure";
 import { SwitchgearFigure } from "./SwitchgearFigure";
+import { MeterPanelFigure } from "./MeterPanelFigure";
+import { GuyAnchorFigure } from "./GuyAnchorFigure";
+import { CutoutFigure } from "./CutoutFigure";
+import { JunctionCabinetFigure } from "./JunctionCabinetFigure";
+import { CtCabinetFigure } from "./CtCabinetFigure";
+import { RiserFigure } from "./RiserFigure";
+import { RecloserFigure } from "./RecloserFigure";
 
 type FigureProps = { transition?: { progress: number; phase: "out" | "in" } };
 type FigureComponent = (props: FigureProps) => React.JSX.Element;
@@ -34,16 +40,22 @@ type FigureComponent = (props: FigureProps) => React.JSX.Element;
  * the 1350ms of invented timing this replaces; the dwell is long enough that
  * the rotation is ambient rather than attention-seeking. Pausing freezes
  * accumulated time instead of cancelling, so a resumed flight continues
- * rather than jumping. Presses and dots are inert mid-flight (each figure
+ * rather than jumping. Presses are inert mid-flight (each figure
  * disables its Press whenever `transition` is defined), and if focus was
  * riding the outgoing figure it moves to this region instead of dropping to
- * the page — otherwise a keyboard user who tabs to the dots would freeze a
- * half-scattered figure on screen indefinitely.
+ * the page.
  */
 const FIGURES: Array<{ id: string; label: string; Component: FigureComponent }> = [
   { id: "pole", label: "Distribution pole", Component: PoleFigure },
   { id: "padmount", label: "Padmount transformer", Component: PadmountFigure },
   { id: "switchgear", label: "1200 amp switchgear", Component: SwitchgearFigure },
+  { id: "meterpanel", label: "Meter panel and mast", Component: MeterPanelFigure },
+  { id: "guy", label: "Guy wire and anchor", Component: GuyAnchorFigure },
+  { id: "cutout", label: "Cutout and arrester", Component: CutoutFigure },
+  { id: "junction", label: "Junction cabinet", Component: JunctionCabinetFigure },
+  { id: "ctcabinet", label: "CT cabinet and meter", Component: CtCabinetFigure },
+  { id: "riser", label: "Riser and U-guard", Component: RiserFigure },
+  { id: "recloser", label: "Recloser", Component: RecloserFigure },
 ];
 
 const DWELL_MS = 7000;
@@ -56,7 +68,20 @@ const TOTAL_MS = OUT_MS + IN_MS - OVERLAP_MS;
 type Flight = { from: number; to: number; elapsed: number };
 
 export function FigureCarousel() {
-  const reduceMotion = useReducedMotion();
+  const reduceMotionQuery = useReducedMotion();
+  // The server cannot read the motion preference, so it always renders the
+  // carousel tree. If the first client render branched on the media query
+  // instead, reduced-motion users would hydrate carousel HTML as the static
+  // row — React error 418 and a remount. useSyncExternalStore holds the
+  // server snapshot (false) through hydration, then flips once, with no
+  // setState-in-effect. Motion users never see a swap (same branch before
+  // and after); reduced-motion users see one swap to the row.
+  const mounted = useSyncExternalStore(
+    () => () => {},
+    () => true,
+    () => false
+  );
+  const reduceMotion = mounted && reduceMotionQuery;
   const [index, setIndex] = useState(0);
   const [flight, setFlight] = useState<Flight | null>(null);
   const [progress, setProgress] = useState(0);
@@ -83,15 +108,6 @@ export function FigureCarousel() {
       regionRef.current.focus({ preventScroll: true });
     }
   }, []);
-
-  const select = useCallback(
-    (next: number) => {
-      if (flightRef.current) return;
-      const wrapped = ((next % FIGURES.length) + FIGURES.length) % FIGURES.length;
-      beginFlight(wrapped);
-    },
-    [beginFlight]
-  );
 
   // Dwell timer: idle only.
   useEffect(() => {
@@ -137,7 +153,7 @@ export function FigureCarousel() {
       <div
         role="group"
         aria-label="Service equipment"
-        className="flex items-start justify-center gap-3"
+        className="flex flex-wrap items-start justify-center gap-3"
       >
         {FIGURES.map(({ id, Component }, i) => (
           <motion.div
@@ -145,7 +161,7 @@ export function FigureCarousel() {
             initial={{ opacity: 0, y: 14, filter: "blur(4px)" }}
             animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
             transition={{ ...spring.moderate, delay: i * 0.06 }}
-            className="w-28 sm:w-36"
+            className="w-24 sm:w-32"
           >
             <Component />
           </motion.div>
@@ -202,33 +218,6 @@ export function FigureCarousel() {
             <settled.Component />
           </div>
         )}
-      </div>
-      <div className="flex items-center gap-1.5" aria-label="Figures">
-        {FIGURES.map(({ id: fid, label: flabel }, i) => {
-          const active = i === index && !inFlight;
-          return (
-            <motion.button
-              key={fid}
-              type="button"
-              disabled={inFlight}
-              aria-current={active}
-              aria-label={`Show ${flabel}`}
-              onClick={() => select(i)}
-              className={cn(
-                "size-2 rounded-full outline-none",
-                "focus-visible:ring-1 focus-visible:ring-[color:var(--focus-ring)]",
-                inFlight && "cursor-default"
-              )}
-              initial={false}
-              animate={{
-                scale: active ? 1.25 : 1,
-                opacity: active ? 1 : 0.35,
-              }}
-              transition={spring.fast}
-              style={{ backgroundColor: "var(--foreground)" }}
-            />
-          );
-        })}
       </div>
     </div>
   );

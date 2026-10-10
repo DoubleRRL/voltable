@@ -34,16 +34,17 @@ const INS_R0: Box3 = { x: 150, y: 52, z: 148, w: 12, d: 12, h: 14 };
 const INS_R1: Box3 = { x: 172, y: 52, z: 148, w: 12, d: 12, h: 14 };
 const INS_R2: Box3 = { x: 194, y: 52, z: 148, w: 12, d: 12, h: 14 };
 
-// Pole-mount transformer hung off the left pole's +x face: two hanger
-// brackets bridge the visible gap between pole face (x 66) and can face
-// (x 72); the can body carries cooling fins, a wider lid rim caps it, and
-// two bushings stand on the lid.
-const HANG_BOT: Box3 = { x: 66, y: 174, z: 76, w: 6, d: 8, h: 4 };
-const HANG_TOP: Box3 = { x: 66, y: 174, z: 102, w: 6, d: 8, h: 4 };
-const CAN: Box3 = { x: 72, y: 167, z: 68, w: 28, d: 22, h: 46 };
-const LID: Box3 = { x: 70, y: 165, z: 114, w: 32, d: 26, h: 7 };
-const BUSH_A: Box3 = { x: 77, y: 174, z: 121, w: 8, d: 8, h: 12 };
-const BUSH_B: Box3 = { x: 89, y: 174, z: 121, w: 8, d: 8, h: 12 };
+// Pole-mount transformer hung on the left pole's front face, centred on it
+// in screen space (screen-x runs x−y, so the can centre sits where the pole
+// centre is): two hanger brackets bridge the pole face (y 186) to the can
+// back, the can body carries cooling fins, a wider lid rim caps it, and two
+// bushings stand on the lid.
+const HANG_BOT: Box3 = { x: 56, y: 182, z: 76, w: 10, d: 12, h: 4 };
+const HANG_TOP: Box3 = { x: 56, y: 182, z: 102, w: 10, d: 12, h: 4 };
+const CAN: Box3 = { x: 61, y: 184, z: 68, w: 28, d: 22, h: 46 };
+const LID: Box3 = { x: 59, y: 182, z: 114, w: 32, d: 26, h: 7 };
+const BUSH_A: Box3 = { x: 66, y: 191, z: 121, w: 8, d: 8, h: 12 };
+const BUSH_B: Box3 = { x: 78, y: 191, z: 121, w: 8, d: 8, h: 12 };
 
 const GRAIN = "M5 6V162 M11 6V162";
 const FINS = "M7 6V40 M14 6V40 M21 6V40";
@@ -124,19 +125,19 @@ const SEC_B_PTS = twist(SEC_BASE, -1);
 const SEC_A_PATH = makePath(SEC_A_PTS);
 const SEC_B_PATH = makePath(SEC_B_PTS);
 
-// Short jumpers from the two eastern primary wires down to the bushing tops
-// (bushing centres x 81 / 93, y 178, tops z 133).
+// Short jumpers from the two western primary wires down to the bushing tops
+// (bushing centres x 70 / 82, y 195, tops z 133).
 const J1_PTS = curve(
   [58, 178, 160],
-  [60, 178, 150],
-  [70, 178, 138],
-  [81, 178, 134],
+  [58, 186, 150],
+  [62, 192, 138],
+  [70, 195, 134],
 );
 const J2_PTS = curve(
   [80, 178, 160],
-  [82, 178, 151],
-  [87, 178, 139],
-  [93, 178, 134],
+  [80, 186, 150],
+  [82, 192, 138],
+  [82, 195, 134],
 );
 const J1_PATH = makePath(J1_PTS);
 const J2_PATH = makePath(J2_PTS);
@@ -161,8 +162,8 @@ const POLE_FIELD = field(POLE_BOXES, POLE_POINTS);
 
 /**
  * Three-pole distribution line: three crossarm poles carrying a 3-conductor
- * primary, a pole-mount transformer can on hanger brackets off the left
- * pole (wide lid rim, two lid bushings with jumpers), and a twisted triplex
+ * primary, a pole-mount transformer can hung on the left pole's front face
+ * (wide lid rim, two lid bushings with jumpers), and a twisted triplex
  * secondary between the middle and right poles. Pressing flashes the
  * transformer bushing; the flash is the whole output.
  */
