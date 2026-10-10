@@ -63,11 +63,14 @@ The `TabsSubtle` idea died with the header bar.
 and prose come first, then the figure thumbnails, then a "Sources" section
 with the citations — the shape every modern answer UI converged on. The
 retrieval trail ("How this was found") used to sit above the answer and read
-as a second answer competing with the first, so it is gone: while streaming
+as a second answer competing with the first, so it   is gone: while streaming
 the badge area says "Writing…", and once settled each figure and citation sits
 under the answer it belongs to. There is no right-hand rail; the conversation
 is a single `max-w-3xl` column so an evidence column can never squeeze the
-answer or orphan the citations from their turn. And a not-covered answer
+answer or orphan the citations from their turn. Refusal copy is
+planner-facing only: the notice once read "Don't quote a number from this",
+which is an instruction to the model leaking into the UI — it now says what
+matched and where to look, nothing else. And a not-covered answer
 shows no Sources section at all: near-miss chunks are handed back as
 citations, not as evidence, and listing them under a "Sources" header claims
 support they explicitly do not give. The refusal stays three surfaces — badge,
@@ -99,6 +102,16 @@ knowledge, then misread the row on top of it (it attached row 1's `A` to
   exactly one row plus its legend are in context: no ~7s model call, and the
   row and legend line are quoted verbatim (the fuzzy quoter would balloon
   them to the whole table). Anything ambiguous falls through to the model.
+- Coverage reads the section heading with the chunk text (a table chunk is
+  stripped of context at ingest — its text starts at the separator row), and
+  the alias table covers approval language (approved/acceptable/
+  acceptability) and pools (pool/pools/swimming) by the same precedent as the
+  unit synonyms. Question filler (how/does/many/need/…) is stopped out of the
+  FTS query because it only ever drags the coverage denominator.
+- A markdown table with real data rows subsumes its OCR sibling; a
+  title-and-footer stub yields to the OCR flow that actually carries the
+  numbers. Either way the pair costs one context slot, and short text already
+  above a table stays where BM25 put it.
 
 **isokit motion tokens are vendor-owned.** The FF audit flags `260ms`/`200ms`
 transitions inside figure SVGs and measured heights like `20px`/`44px`/`48px`

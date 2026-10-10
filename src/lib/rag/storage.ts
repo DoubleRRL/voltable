@@ -568,6 +568,22 @@ export const getStoredChunksByIds = (ids: string[]): StoredChunk[] => {
 };
 
 /**
+ * All chunks sharing a pair group — typically a markdown table, its OCR
+ * rendering, and its caption. Used to reunite a table stub with the OCR flow
+ * that actually carries its numbers.
+ */
+export const getChunksByPairGroup = (pairGroupId: string): StoredChunk[] => {
+  if (!pairGroupId) {
+    return [];
+  }
+  const db = getDb();
+  const rows = db
+    .prepare("SELECT * FROM chunks WHERE pair_group_id = ? ORDER BY id ASC")
+    .all(pairGroupId) as Record<string, unknown>[];
+  return rows.map(toStoredChunk);
+};
+
+/**
  * Short text chunks on the given pages — legends, footnotes, titles. A table
  * chunk is often unreadable without them: the EUSERC table's A/U/C/B column
  * is defined by a one-line legend on the same page, and retrieval that
@@ -879,9 +895,10 @@ export const getQueryCacheCount = (): number => {
  */
 const FTS_STOPWORDS = new Set([
   "a", "an", "and", "any", "are", "as", "at", "be", "been", "but", "by", "can", "company",
-  "customer", "each", "for", "from", "has", "have", "in", "into", "is", "it", "its", "may",
-  "must", "not", "of", "on", "or", "our", "shall", "should", "such", "than", "that", "the",
-  "their", "then", "there", "these", "this", "those", "to", "was", "were", "what", "when",
+  "customer", "did", "does", "each", "for", "from", "has", "have", "how", "in", "into", "is", "it", "its",
+  "just", "many", "may", "much", "must", "need", "needs", "not", "of", "on", "or", "our", "please",
+  "shall", "should", "such", "than", "that", "the",
+  "their", "then", "there", "these", "this", "those", "to", "want", "was", "were", "what", "when",
   "where", "which", "who", "will", "with", "would", "you", "your",
 ]);
 

@@ -2,6 +2,7 @@ import type { RetrievalResult, StoredChunk } from "@/lib/rag/types";
 import {
   ftsQueryTokens,
   getAssetsForChunkIds,
+  getChunksByPairGroup,
   getShortTextChunksByPages,
   getStoredChunksByIds,
   searchChunksFts,
@@ -104,6 +105,9 @@ const UNIT_ALIASES: Record<string, string[]> = {
   approval: ["approved", "acceptable"],
   approvals: ["approved", "acceptable"],
   unapproved: ["unacceptable"],
+  pool: ["pools", "swimming"],
+  pools: ["pool", "swimming"],
+  swimming: ["pool", "pools"],
   gauss: ["mg", "milligauss"],
   maximum: ["max", "mg", "milligauss"],
   max: ["maximum", "mg"],
@@ -336,22 +340,21 @@ export const retrieveChunks = async (
   // (the table itself, or the OCR rendering that matched): the markdown
   // table, then the page's short text. A group never reorders anything above
   // its own slot; short text already above a table stays where BM25 put it.
-  // The OCR sibling is dropped when the markdown subsumes it (real pipe
-  // structure), so the pair does not eat two of the four context slots.
-  // Tables travel with their key and their legend. Two retrieval gaps conspire
-  // against table questions. First, the clean markdown table often loses to
-  // its own OCR sibling (same words, denser BM25), and the OCR flow drops the
-  // code column into unreadable order — so the model gets a table it cannot
-  // read. Second, a table verdict is frequently a code ("U") defined by a
-  // short text chunk on the same page ("U = Unacceptable") that the question's
-  // terms never match — so the model gets a code it can only guess at.
-  //
-  // So each table forms one group at the position of its first appearance
-  // (the table itself, or the OCR rendering that matched): the markdown
-  // table, then the page's short text. A group never reorders anything above
-  // its own slot; short text already above a table stays where BM25 put it.
-  // The OCR sibling is dropped when the markdown subsumes it (real pipe
-  // structure), so the pair does not eat two of the four context slots.
+  // Which rendering survives is decided by content, not by type: a markdown
+  // table with real data rows subsumes its OCR sibling (same table, cleaner
+  // reading), while a title-and-footer stub yields to the OCR flow that
+  // actually carries the numbers. Either way the pair costs one context slot,
+  // and legends are capped at two per group.
+  const tableDataRows = (text: string): string[] =>
+    text
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(
+        (l) =>
+          l.includes("|") &&
+          !/^[|\s:=-]+$/.test(l) &&
+          !/EFFECTIVE DATE/i.test(l),
+      );
   const withLegends = (() => {
     const heads = (() => {
       const ids = [
@@ -391,6 +394,16 @@ export const retrieveChunks = async (
     });
     if (groups.length === 0) return merged;
     const inList = new Set(merged.map((s) => s.chunk.id));
+    // OCR siblings for stub tables, fetched by pair group (one indexed query
+    // per group; groups are few).
+    const sibsByTable = new Map<string, StoredChunk[]>();
+    for (const group of groups) {
+      if (!group.table.pairGroupId) continue;
+      const sibs = getChunksByPairGroup(group.table.pairGroupId).filter(
+        (c) => c.id !== group.table.id && c.chunkType === "text",
+      );
+      if (sibs.length > 0) sibsByTable.set(group.table.id, sibs);
+    }
     // Fresh short text per grouped page (legends, footnotes, titles).
     const pages = [...new Set(groups.map((g) => g.page))];
     const freshByPage = new Map<number, StoredChunk[]>();
@@ -401,20 +414,9 @@ export const retrieveChunks = async (
       freshByPage.set(legend.page, list);
     }
     // Short text already in the ranking that belongs to a group moves up to
-    // it — but only from below its slot. A legend that already matched on its
-    // own above the table is left exactly where it is.
+    // it — but only from below its slot.
     const movingByGroup = new Map<Group, typeof merged>();
     const movingIds = new Set<string>();
-    // A markdown table sitting below its own OCR trigger is pulled up to the
-    // group slot with it — leaving it where BM25 put it usually means leaving
-    // it below the top-K cut while its lossy OCR sibling leads.
-    for (const group of groups) {
-      if (!inList.has(group.table.id)) continue;
-      const at = merged.findIndex((s) => s.chunk.id === group.table.id);
-      if (at > group.slot) {
-        movingIds.add(group.table.id);
-      }
-    }
     merged.forEach((s, i) => {
       if (s.chunk.chunkType !== "text" || s.chunk.text.length > 400) return;
       const group = groups.find((g) => g.page === s.chunk.page && i > g.slot);
@@ -426,26 +428,48 @@ export const retrieveChunks = async (
     });
     const usedLegends = new Set<string>();
     const emittedTables = new Set<string>();
+    const droppedIds = new Set<string>();
     const out: typeof merged = [];
     const emitGroup = (group: Group, anchorScore: number) => {
       if (emittedTables.has(group.table.id)) return;
       emittedTables.add(group.table.id);
-      const natural = merged.find((s) => s.chunk.id === group.table.id) ?? null;
-      if (!inList.has(group.table.id)) {
-        // The markdown table itself, scored just under its anchor so the
-        // order is explicit. A table already in the ranking keeps its natural
-        // score — re-scoring it down would demote evidence BM25 placed.
+      const sibs = sibsByTable.get(group.table.id) ?? [];
+      const substantive = tableDataRows(group.table.text).length >= 2;
+      // Winner carries the numbers: the markdown when it has real rows, the
+      // longest OCR flow when the markdown is a title-and-footer stub. The
+      // loser is skipped at its natural position below.
+      let winner: { chunk: StoredChunk; fresh: boolean } | null = null;
+      if (substantive) {
+        winner = { chunk: group.table, fresh: !inList.has(group.table.id) };
+        for (const sib of sibs) droppedIds.add(sib.id);
+        if (group.ocrId) droppedIds.add(group.ocrId);
+      } else if (sibs.length > 0) {
+        const best = [...sibs].sort((a, b) => b.text.length - a.text.length)[0] as StoredChunk;
+        winner = { chunk: best, fresh: !inList.has(best.id) };
+        droppedIds.add(group.table.id);
+        for (const sib of sibs) {
+          if (sib.id !== best.id) droppedIds.add(sib.id);
+        }
+        if (group.ocrId && group.ocrId !== best.id) droppedIds.add(group.ocrId);
+      } else {
+        winner = { chunk: group.table, fresh: !inList.has(group.table.id) };
+      }
+      // The winner is spoken for: the moving scan may also have claimed it,
+      // and its natural row (if any) must not re-emit it below.
+      if (winner) droppedIds.add(winner.chunk.id);
+      if (winner.fresh) {
         out.push({
-          ...scoreChunk(group.table, intent, bm25ById),
+          ...scoreChunk(winner.chunk, intent, bm25ById),
           score: anchorScore - 0.0005,
         });
-      } else if (natural && movingIds.has(group.table.id)) {
-        // Relocated from below: same entry, kept score, new position.
-        out.push(natural);
+      } else {
+        const natural = merged.find((s) => s.chunk.id === winner.chunk.id);
+        if (natural) out.push(natural);
       }
       // Definitions first: a "U = Unacceptable" line is the key, an acronym
       // expansion is not. Two legend slots per group; the top-K slice does
-      // the rest.
+      // the rest. Dropped OCR siblings stay dropped even if the moving scan
+      // claimed them first.
       const candidates: Array<{
         key: string;
         text: string;
@@ -461,7 +485,7 @@ export const retrieveChunks = async (
           text: moved.chunk.text,
           make: (score: number) => ({ ...moved, score }),
         })),
-      ].filter((c) => !usedLegends.has(c.key));
+      ].filter((c) => !usedLegends.has(c.key) && !droppedIds.has(c.key));
       candidates
         .sort((a, b) => {
           const ka = a.text.includes("=") ? 0 : 1;
@@ -475,7 +499,7 @@ export const retrieveChunks = async (
         });
     };
     for (const s of merged) {
-      if (movingIds.has(s.chunk.id)) continue;
+      if (droppedIds.has(s.chunk.id) || movingIds.has(s.chunk.id)) continue;
       const group = groups.find(
         (g) =>
           !emittedTables.has(g.table.id) &&
@@ -484,15 +508,6 @@ export const retrieveChunks = async (
       if (!group) {
         out.push(s);
         continue;
-      }
-      // The OCR trigger is dropped when the markdown subsumes it; otherwise
-      // the trigger stays and the table follows it.
-      const dropOcr =
-        group.ocrId !== null &&
-        s.chunk.id === group.ocrId &&
-        group.table.text.includes("|");
-      if (!dropOcr) {
-        out.push(s);
       }
       emitGroup(group, s.score);
     }

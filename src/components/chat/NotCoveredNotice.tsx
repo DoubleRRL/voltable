@@ -16,14 +16,12 @@ type NotCoveredNoticeProps = {
 /**
  * The ESR does not cover this.
  *
- * One sentence and the nearest chapters, and nothing else. The grounding badge
- * already says "Not in the ESR", so this must not restate it — a refusal the
- * planner sees three times reads as three separate warnings rather than one
- * clear answer, and buries the thing they actually need: which sections to open.
- *
- * It says what to do next rather than describing a mechanism. "Nothing cleared
- * the retrieval threshold" is about the software; "these are the closest
- * sections" is about their next minute.
+ * One sentence and the nearest chapters, and nothing else — every word here
+ * is planner-facing. The grounding badge already says "Not in the ESR", so
+ * this must not restate it, and it must never carry instructions meant for
+ * the model ("don't quote a number" is the software's business, not the
+ * planner's). What remains is what they actually need: nothing matched, and
+ * which sections to open.
  */
 export function NotCoveredNotice({
   chapters = [],
@@ -45,7 +43,7 @@ export function NotCoveredNotice({
         style={{ fontVariationSettings: fontWeights.normal }}
       >
         {fromRetrieval
-          ? "Nothing in the manual matched. Don't quote a number from this."
+          ? "Nothing in the manual matched."
           : "No passage came back to check this against, so treat it as unverified."}
       </p>
       {chapters.length > 0 ? (
