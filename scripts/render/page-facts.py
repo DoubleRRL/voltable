@@ -108,11 +108,14 @@ def resolve_page_label(fragments) -> str | None:
 
 def parse(rules: dict, fragments) -> dict:
     footer = band_text(fragments)
+    # Key names match the TypeScript PageFacts so ingest reads them by name.
+    # Emitting "sheet" here read as `sheetOf: undefined` on the other side and
+    # silently dropped the sheet number from every sheet-numbered citation.
     out = {
         "printedPage": None,
         "chapter": None,
         "standard": None,
-        "sheet": None,
+        "sheetOf": None,
         "sheetCount": None,
         "effectiveDate": None,
     }
@@ -132,7 +135,7 @@ def parse(rules: dict, fragments) -> dict:
             out["standard"] = re.sub(r"\s+", " ", standard.group(1).strip())
         sheet = SHEET_RE.search(footer)
         if sheet:
-            out["sheet"] = int(sheet.group(1))
+            out["sheetOf"] = int(sheet.group(1))
             out["sheetCount"] = int(sheet.group(2))
 
     return out

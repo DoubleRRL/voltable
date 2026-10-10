@@ -52,17 +52,28 @@ def manual_pdfs() -> dict[str, Path]:
     return out
 
 
-def cited_pages(db: sqlite3.Connection, docs: list[str] | None) -> dict[str, list[int]]:
-    """Pages that actually need a page derivative.
+def cited_pages(
+    db: sqlite3.Connection, docs: list[str] | None, include_tables: bool = False
+) -> dict[str, list[int]]:
+    """Pages that need a one-page derivative.
 
-    A page qualifies if it was cited in an answer, or if it carries a figure or
-    table the answer can surface. Everything else stays out of the bundle.
+    Pages carrying a figure or diagram, by default. A table-only page is already
+    served better by its crop plus the table's own extracted markdown, and a
+    derivative of it earned nothing: across the three manuals indexed so far,
+    figure pages are 574 of 1,051 and the table-only remainder cost 160 MB of
+    PDFs nobody opens. `--all-pages` puts them back.
+
+    Everything not in this set still ships as a page render, so a citation never
+    has nothing to open.
     """
-    where = ""
+    clauses = []
     params: list = []
     if docs:
-        where = f"WHERE doc_id IN ({','.join('?' * len(docs))})"
+        clauses.append(f"doc_id IN ({','.join('?' * len(docs))})")
         params = list(docs)
+    if not include_tables:
+        clauses.append("kind IN ('figure','diagram')")
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     rows = db.execute(
         f"SELECT DISTINCT doc_id, page FROM visual_assets {where}", params
     ).fetchall()
@@ -84,6 +95,16 @@ def write_page_pdfs(pdfs: dict[str, Path], pages: dict[str, list[int]], out_root
         target = out_root / doc_id / "pdf"
         target.mkdir(parents=True, exist_ok=True)
         reader = PdfReader(str(source))
+        keep = set(numbers)
+        # Stale derivatives from an earlier, wider run would otherwise ride
+        # along in the bundle: they are real pages, just not ones anything
+        # cites any more.
+        for existing in target.glob("page-*.pdf"):
+            try:
+                if int(existing.stem.split("-", 1)[1]) not in keep:
+                    existing.unlink()
+            except (ValueError, IndexError):
+                continue
         for page_no in numbers:
             if not 1 <= page_no <= len(reader.pages):
                 continue
@@ -97,9 +118,35 @@ def write_page_pdfs(pdfs: dict[str, Path], pages: dict[str, list[int]], out_root
     return written
 
 
-def downscale_images(out_root: Path, docs: list[str] | None, limit: int) -> None:
-    """Emit WebP renditions at the sizes the UI actually displays."""
+def pages_without_assets(db: sqlite3.Connection) -> dict[str, set[int]]:
+    """Cited pages that have no catalogued crop — the only ones needing a render.
+
+    A page render is a fallback for a cited page nothing was catalogued on. Where
+    a crop exists the render is the same drawing a second time at twice the
+    pixels, and across the three manuals indexed so far that redundancy was about
+    420 MB of the bundle.
+    """
+    rows = db.execute(
+        "SELECT DISTINCT doc_id, page FROM visual_assets WHERE kind IN ('figure','diagram')"
+    ).fetchall()
+    with_asset: dict[str, set[int]] = {}
+    for doc_id, page in rows:
+        with_asset.setdefault(doc_id, set()).add(page)
+
+    needed: dict[str, set[int]] = {}
+    for doc_id, page in db.execute("SELECT DISTINCT doc_id, page FROM chunks").fetchall():
+        if page not in with_asset.get(doc_id, ()):
+            needed.setdefault(doc_id, set()).add(page)
+    return needed
+
+
+def optimise_images(
+    db: sqlite3.Connection, out_root: Path, docs: list[str] | None, limit: int
+) -> None:
+    """Emit lossless WebP at display sizes, and drop redundant page renders."""
     from PIL import Image
+
+    renders_kept = pages_without_assets(db)
 
     for doc_dir in sorted(p for p in out_root.iterdir() if p.is_dir()):
         if docs and doc_dir.name not in docs:
@@ -107,21 +154,47 @@ def downscale_images(out_root: Path, docs: list[str] | None, limit: int) -> None
         pngs = sorted(doc_dir.glob("*.png"))
         if limit:
             pngs = pngs[:limit]
+        kept = dropped = 0
         for png in pngs:
-            if png.stem.startswith("fig-"):
-                target, longest = png.with_suffix(".webp"), CROP_MAX
-            else:
-                target, longest = png.with_suffix(".webp"), PAGE_MAX
-            with Image.open(png) as im:
-                if max(im.size) <= longest:
-                    # Already small enough; copy the bytes rather than
-                    # re-encoding, which would only lose quality.
-                    target.write_bytes(png.read_bytes())
+            if png.stem.startswith("page-"):
+                try:
+                    page_no = int(png.stem.split("-", 1)[1])
+                except (ValueError, IndexError):
+                    page_no = -1
+                if page_no not in renders_kept.get(doc_dir.name, set()):
+                    png.unlink()
+                    dropped += 1
                     continue
+                longest = PAGE_MAX
+            else:
+                longest = CROP_MAX
+            target = png.with_suffix(".webp")
+            with Image.open(png) as im:
                 # Line art and schematics: lossless, so a dimension stays
-                # readable and no callout edge fringes.
-                im.convert("RGB").save(target, "WEBP", lossless=True, method=4)
-        print(f"[evidence] {doc_dir.name}: {len(pngs)} images")
+                # readable and no callout edge fringes. WebP lossless on this
+                # material runs about 30% under PNG.
+                if max(im.size) > longest:
+                    scale = longest / float(max(im.size))
+                    im = im.convert("RGB").resize(
+                        (max(1, int(im.width * scale)), max(1, int(im.height * scale))),
+                        Image.LANCZOS,
+                    )
+                else:
+                    im = im.convert("RGB")
+                im.save(target, "WEBP", lossless=True, method=4)
+            png.unlink()
+            kept += 1
+
+        # Point the index at what actually shipped.
+        db.execute(
+            "UPDATE visual_assets SET"
+            " figure_url = replace(figure_url, '.png', '.webp'),"
+            " thumbnail_url = replace(thumbnail_url, '.png', '.webp')"
+            " WHERE doc_id = ?",
+            (doc_dir.name,),
+        )
+        db.commit()
+        print(f"[evidence] {doc_dir.name}: {kept} webp, {dropped} redundant page renders dropped")
 
 
 def main() -> int:
@@ -130,6 +203,11 @@ def main() -> int:
     ap.add_argument("--docs", help="comma-separated manual ids")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--out", default=str(ROOT / "public" / "evidence"))
+    ap.add_argument(
+        "--all-pages",
+        action="store_true",
+        help="Also emit derivatives for table-only pages (larger bundle).",
+    )
     args = ap.parse_args()
 
     if not DB.exists():
@@ -138,8 +216,8 @@ def main() -> int:
     docs = args.docs.split(",") if args.docs else None
     out_root = Path(args.out)
 
-    db = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
-    pages = cited_pages(db, docs)
+    db = sqlite3.connect(DB)
+    pages = cited_pages(db, docs, include_tables=args.all_pages)
 
     if args.command == "plan":
         total = sum(len(v) for v in pages.values())
@@ -148,8 +226,9 @@ def main() -> int:
         print(f"total page derivatives: {total}")
         return 0
 
+    db.row_factory = sqlite3.Row
     written = write_page_pdfs(manual_pdfs(), pages, out_root)
-    downscale_images(out_root, docs, args.limit)
+    optimise_images(db, out_root, docs, args.limit)
     print(f"[evidence] {written} page derivatives under {out_root}")
     return 0
 

@@ -107,6 +107,46 @@ def get_ocr():
     return _ocr
 
 
+def ocr_text_isolated(png: Path) -> str:
+    """OCR one crop in a forked child, so a native crash costs that crop only.
+
+    RapidOCR runs on onnxruntime and segfaults on some inputs — a 1388x1039
+    crop of UGS page 755, a line drawing dense enough to trip the detector.
+    A segfault cannot be caught in-process, so it killed the worker, and with it
+    the page JSON that said the render and the crops had already succeeded. The
+    crop files were on disk the whole time: the evidence was fine and the OCR was
+    an enhancement.
+
+    Forking around the call keeps the loss where it belongs. The parent reads the
+    child's text over a pipe and treats any abnormal exit as "no text for this
+    crop", which is what a crop with genuinely no legible text looks like anyway.
+    """
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # child
+        try:
+            os.close(read_fd)
+            text = ocr_text(png)
+            with os.fdopen(write_fd, "w") as sink:
+                sink.write(text)
+            os._exit(0)
+        except BaseException:
+            os._exit(1)
+
+    os.close(write_fd)
+    parts: list[str] = []
+    with os.fdopen(read_fd) as source:
+        while True:
+            block = source.read(4096)
+            if not block:
+                break
+            parts.append(block)
+    _, status = os.waitpid(pid, 0)
+    if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
+        return ""
+    return "".join(parts)
+
+
 def ocr_text(png: Path) -> str:
     """OCR a figure crop, downscaling first if needed.
 
@@ -184,7 +224,7 @@ def main() -> int:
                     "file": crop_png.name,
                     "width": cw,
                     "height": ch,
-                    "ocr": ocr_text(crop_png),
+                    "ocr": ocr_text_isolated(crop_png),
                 }
             )
 

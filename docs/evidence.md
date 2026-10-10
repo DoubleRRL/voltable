@@ -74,12 +74,39 @@ There is no DOH page 402 to cite. The registry carries the scheme
 (`src/lib/rag/docs.ts`) and `citeLabel()` composes from it, so no call site has
 to remember which manuals are which.
 
+## Measured, three manuals indexed
+
+ESR, ADS and UGS — 1,207 pages, 10,141 chunks, 2,326 assets:
+
+| Stage | Result |
+|---|---|
+| Figure crops + page renders, as rendered | 2,342 MB PNG |
+| After lossless WebP at display size, redundant page renders dropped | 544 MB |
+| One-page derivatives (574 figure pages) | 177 MB of that |
+| Final app bundle, no PDFs | **674 MB**, evidence 510 MB against a 600 MB budget |
+
+Two decisions came out of measuring rather than reasoning:
+
+- **Lossless WebP, not PNG.** Technical line art compresses about 30% better
+  lossless, and it must stay lossless: a blurred dimension on a clearance
+  drawing is worse than a large file. Safari has supported WebP since Safari 14
+  on Big Sur and the app requires macOS 13.
+- **Page renders only where nothing was catalogued.** A page render is a
+  fallback for a cited page with no crop; where a crop exists the render is the
+  same drawing twice. Dropping the redundancy took about 420 MB.
+
+Page derivatives are emitted for pages carrying a figure or diagram, not for
+table-only pages: those are already served better by the crop plus the table's
+extracted markdown. Across the three manuals that is 574 pages rather than
+1,051, and 177 MB rather than 293 MB. `--all-pages` puts the rest back.
+
 ## Building evidence
 
 ```bash
 npm run parse:manuals          # MinerU layout, two at a time
 npm run ingest:manuals         # chunks, crops, OCR, index
-npm run build:evidence         # one-page derivatives + downscaled images
+npm run plan:evidence         # what a build would produce, and for how many pages
+npm run build:evidence        # derivatives + WebP + URL rewrite
 bash scripts/app/build-app.sh  # bundle, with a size budget check
 ```
 
