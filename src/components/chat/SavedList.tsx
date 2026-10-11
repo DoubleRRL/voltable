@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 
 import { ChapterBadge } from "./ChapterBadge";
 import { GroundingBadge } from "./GroundingBadge";
-import { FigureCard } from "./FigureCard";
+import { FigureRow } from "./FigureRow";
 import type { SavedAnswer } from "./useSavedAnswers";
 
 type SavedListProps = {
@@ -124,15 +124,11 @@ export function SavedList({ saved, onRemove, onClear, onAsk }: SavedListProps) {
               </div>
 
               {item.figures.length > 0 ? (
-                <div className="flex flex-wrap gap-1.5">
-                  {item.figures.slice(0, 3).map((figure) => (
-                    <FigureCard
-                      key={figure.id}
-                      figure={figure}
-                      className="max-w-[220px]"
-                    />
-                  ))}
-                </div>
+                <FigureRow
+                  figures={item.figures.slice(0, 3)}
+                  className="gap-1.5"
+                  cardClassName="max-w-[220px]"
+                />
               ) : null}
             </li>
           );

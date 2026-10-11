@@ -117,6 +117,14 @@ const UNIT_ALIASES: Record<string, string[]> = {
   // Crew shorthand, per planner vocabulary: oh/ug/pri/sec/svc/str/pad.
   // Short-to-long covers typed shorthand ("pri" against "primary"); the
   // reverse covers OCR and figure callouts that abbreviate ("Pri.", "Svc.").
+  // Company name the same way, both directions: the manuals say SCE and
+  // Company, planners say Edison. Without it "only edison on the pole"
+  // matches pole-marking boilerplate ("Edison Poles" bands) instead of the
+  // rule text that governs the pole, because the rule text never says Edison.
+  // Deliberately not mapped to "company": that word is everywhere and would
+  // dilute rather than aim.
+  edison: ["sce"],
+  sce: ["edison"],
   pri: ["primary"],
   primary: ["pri"],
   sec: ["secondary"],

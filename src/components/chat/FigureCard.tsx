@@ -16,6 +16,13 @@ import { FigureLightbox } from "./FigureLightbox";
 type FigureCardProps = {
   figure: FigureEvidence;
   className?: string;
+  /**
+   * Controlled open: when the parent supplies this, activating the thumbnail
+   * reports the figure instead of mounting a dialog — the row owns the one
+   * shared lightbox so arrow keys can move between figures. Without it the
+   * card keeps its old standalone behaviour.
+   */
+  onOpen?: (figure: FigureEvidence) => void;
 };
 
 const THUMB_PX = 112;
@@ -33,7 +40,7 @@ const THUMB_PX = 112;
  * so a blank image is worse than no image and a failed load removes the
  * thumbnail instead of showing a broken frame.
  */
-export function FigureCard({ figure, className }: FigureCardProps) {
+export function FigureCard({ figure, className, onOpen }: FigureCardProps) {
   const shape = useShape();
   const reduceMotion = useReducedMotion();
   const src = (figure.figureUrl ?? "").trim();
@@ -51,11 +58,19 @@ export function FigureCard({ figure, className }: FigureCardProps) {
     figure.caption?.trim() ||
     `${MANUALS[figure.docId].code} figure on page ${figure.page}`;
 
+  const activate = () => {
+    if (onOpen) {
+      onOpen(figure);
+    } else {
+      setOpen(true);
+    }
+  };
+
   return (
     <>
       <motion.button
         type="button"
-        onClick={() => setOpen(true)}
+        onClick={activate}
         aria-label={`Open figure: ${alt}`}
         className={cn(
           "group relative shrink-0 overflow-hidden outline-none",
@@ -90,7 +105,14 @@ export function FigureCard({ figure, className }: FigureCardProps) {
         </span>
       </motion.button>
       <span className={cn(typeClass("micro"), "sr-only")}>{alt}</span>
-      {open ? <FigureLightbox figure={figure} onClose={() => setOpen(false)} /> : null}
+      {open && !onOpen ? (
+        <FigureLightbox
+          figures={[figure]}
+          index={0}
+          onIndexChange={() => {}}
+          onClose={() => setOpen(false)}
+        />
+      ) : null}
     </>
   );
 }

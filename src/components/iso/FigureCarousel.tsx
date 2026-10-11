@@ -12,6 +12,7 @@ import { PadmountFigure } from "./PadmountFigure";
 import { SwitchgearFigure } from "./SwitchgearFigure";
 import { MeterPanelFigure } from "./MeterPanelFigure";
 import { GuyAnchorFigure } from "./GuyAnchorFigure";
+import { DeadEndPoleFigure } from "./DeadEndPoleFigure";
 import { CutoutFigure } from "./CutoutFigure";
 import { PadmountSwitchgearFigure } from "./PadmountSwitchgearFigure";
 import { CtCabinetFigure } from "./CtCabinetFigure";
@@ -50,6 +51,7 @@ const FIGURES: Array<{ id: string; label: string; Component: FigureComponent }> 
   { id: "switchgear", label: "1200 amp switchgear", Component: SwitchgearFigure },
   { id: "meterpanel", label: "Meter panel and service", Component: MeterPanelFigure },
   { id: "guy", label: "Guy wire and anchor", Component: GuyAnchorFigure },
+  { id: "deadend", label: "Dead-end guy pole", Component: DeadEndPoleFigure },
   { id: "cutout", label: "Cutout and arrester", Component: CutoutFigure },
   { id: "pme", label: "PME pad-mount switchgear", Component: PadmountSwitchgearFigure },
   { id: "ctcabinet", label: "CT cabinet and meter", Component: CtCabinetFigure },

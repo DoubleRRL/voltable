@@ -886,6 +886,89 @@ const extractMeasurements = (text: string): VerifiedMeasurement[] => {
 const measureKey = (m: VerifiedMeasurement): string => `${m.value} ${m.unit}`;
 
 /**
+ * A requirement stated under a condition must be answered under that
+ * condition. "All joint pole attachments shall be designed to Grade A" became
+ * "Must analyze with Grade A construction" for an Edison-only pole — "joint →
+ * A" promoted to "all → A" — because nothing checked the promotion. Prompts
+ * alone do not hold this; the model had the conditional rule in context and
+ * flattened it anyway.
+ *
+ * Trigger, all three required (every guard errs toward not triggering):
+ *  1. a cited quote states a requirement under a stated condition,
+ *  2. the answer states that requirement with none of the condition words,
+ *  3. the answer claims the requirement (must/required/shall), not merely
+ *     mentions the topic.
+ * Repair follows the numbers verifier's shape: the lying headline goes, and
+ * the conditional sentence from the quotes becomes the headline, because a
+ * true quoted headline beats a dropped one. ok:false caps grounding at
+ * partial either way.
+ */
+const CONDITION_MARKERS = [
+  "joint",
+  "unless",
+  "except",
+  "heavy loading",
+  "highway",
+  "limited access",
+];
+
+const REQUIREMENT_CLAIM = /\b(must|required|require|requires|shall be|needs to|has to)\b/i;
+
+const conditionalSentence = (
+  citations: SourceCitation[],
+  conditionWords: string[],
+): string | null => {
+  for (const citation of citations) {
+    const quote = citation.quote ?? "";
+    const sentences = quote.split(/(?<=[.!?])\s+/);
+    for (const sentence of sentences) {
+      const lower = sentence.toLowerCase();
+      const hasCondition = conditionWords.some((w) => lower.includes(w));
+      const hasRequirement =
+        REQUIREMENT_CLAIM.test(sentence) || /grade [ab]\b/i.test(sentence);
+      if (hasCondition && hasRequirement && sentence.length > 20) {
+        return sentence.trim();
+      }
+    }
+  }
+  return null;
+};
+
+const verifyConditionalFidelity = (
+  answer: string,
+  directAnswer: string,
+  citations: SourceCitation[],
+): { answer: string; directAnswer: string; ok: boolean } => {
+  const quotes = citations.map((c) => c.quote ?? "").join("\n");
+  if (!quotes.trim()) return { answer, directAnswer, ok: true };
+  const quoteLower = quotes.toLowerCase();
+
+  const conditionWords = CONDITION_MARKERS.filter((w) => quoteLower.includes(w));
+  if (conditionWords.length === 0) return { answer, directAnswer, ok: true };
+
+  const answerText = `${answer} ${directAnswer}`.toLowerCase();
+  if (conditionWords.some((w) => answerText.includes(w))) {
+    return { answer, directAnswer, ok: true };
+  }
+  if (!REQUIREMENT_CLAIM.test(answerText)) {
+    return { answer, directAnswer, ok: true };
+  }
+
+  // Flattening detected: the quotes condition the requirement and the answer
+  // claims it without the condition.
+  const trueHeadline = conditionalSentence(citations, conditionWords);
+  const caveat =
+    `Per the cited passage this requirement applies under a stated condition ` +
+    `(${conditionWords.join(", ")}), which the answer above drops — check the page.`;
+  return {
+    answer: `${answer} ${caveat}`,
+    directAnswer: trueHeadline ?? "",
+    ok: false,
+  };
+};
+
+
+/**
  * Every measurement in the answer must appear in a cited quote — same number,
  * same unit, no cross-unit conversion. A "2.5 feet" backed only by a "30 in"
  * riser dimension is exactly the fabrication this guards: numerically related
@@ -1033,6 +1116,7 @@ Rules:
 - Do not invent or list exceptions in the JSON. Exceptions are attached separately from storage.
 - When the question mentions orientation or location (front, rear, side, line side, load side, working space, radial, "in front of"), the answer and directAnswer MUST reflect that same orientation. Do not substitute a clearance that applies to a different face (e.g. rear/radial vs front/working space) unless the chunks only address one.
 - Approval questions ("can I approve", "is X allowed", "is X permitted") require a chunk that explicitly permits or prohibits X. A chunk about a nearby topic (upgrade options answering a setback question) is not permission. If the chunks state a requirement the question would violate (a 3-foot minimum where 2 feet is asked), the answer is no — never infer approval from the absence of a prohibition.
+- When a chunk states a requirement that applies under a stated condition (joint pole attachments get Grade A; heavy loading areas get Grade A), the answer and directAnswer MUST carry the condition with the requirement: "it depends — Grade A for joint use, Grade B otherwise." Never promote a conditional requirement to an unconditional one ("joint → A" must not become "all → A"). If the chunks state the general rule but not the exception the question needs, say what the chunks do and do not cover rather than dropping the condition.
 - When a table cell is a code or single letter (e.g. A, U, C, B), interpret it ONLY through a legend or definition chunk in the context ("U = Unacceptable"). Never expand a code from prior knowledge or from the column heading alone. If no legend is present in the chunks, say the code's meaning is not stated in the retrieved passages instead of guessing.
 - Keep answer concise: exactly one short paragraph in answer; one-sentence directAnswer (roughly <= 36 words when needed for units like feet and inches).
 - If confidence is weak return a brief caveat inside answer.
@@ -1382,6 +1466,27 @@ const answerCore = async (
   /** The extractive answer, complete with its figures and summary. */
   const finalizeFallback = () => {
     const fallback = buildFallback();
+    // Same guards as the model path: an extractive answer quotes the chunks
+    // directly, which makes flattened conditionals *more* likely, not less —
+    // the quote carries the condition but the assembled prose can still drop
+    // it. Every consumer of this (extractive mode, model-failure fallback)
+    // gets the guards through here.
+    const numbersOk = verifyAnswerNumbers(
+      question,
+      fallback.answer,
+      fallback.directAnswer,
+      fallback.citations,
+    );
+    const faithful = verifyConditionalFidelity(
+      numbersOk.answer,
+      numbersOk.directAnswer,
+      fallback.citations,
+    );
+    fallback.answer = faithful.answer;
+    fallback.directAnswer = faithful.directAnswer;
+    if (!numbersOk.ok || !faithful.ok) {
+      fallback.grounding = "partial";
+    }
     if (visualFirst && quoteSet.length > 0) {
       fallback.figures = mergeFigureLists(
         fallback.figures,
@@ -1585,6 +1690,13 @@ const answerCore = async (
   // measurement the quotes do not state caps the verdict at partial, drops a
   // headline that states one, and says so in the prose.
   const verified = verifyAnswerNumbers(question, answer, directAnswer, citations);
+  // Conditional fidelity composes after numbers: a flattened requirement is
+  // the same class of lie by position as an unsupported number.
+  const faithful = verifyConditionalFidelity(
+    verified.answer,
+    verified.directAnswer,
+    citations,
+  );
 
   let figuresOut = figures;
   if (visualFirst && quoteSet.length > 0) {
@@ -1593,15 +1705,15 @@ const answerCore = async (
   figuresOut = finalizeFigures(figuresOut, quoteSet);
 
   const response: ChatAnswer = {
-    answer: verified.answer,
-    directAnswer: verified.directAnswer,
+    answer: faithful.answer,
+    directAnswer: faithful.directAnswer,
     citations,
     figures: figuresOut,
     exceptions,
     grounding:
       citations.length === 0
         ? "none"
-        : !verified.ok || citations.length < 2
+        : !verified.ok || !faithful.ok || citations.length < 2
           ? "partial"
           : "esr",
     notCovered: citations.length === 0,

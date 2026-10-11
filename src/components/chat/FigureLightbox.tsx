@@ -49,16 +49,24 @@ type ResizeState = {
  * The panel resizes by dragging its corner — the same "throw it bigger"
  * affordance a planner already uses on their Mac — and the image is
  * `object-contain` so a resize never crops a diagram. Clicking anywhere
- * outside the panel closes it; so does Escape. Everything rides the system's
- * spring tiers and surface tokens; the only custom motion is the resize drag
- * itself, which follows the pointer 1:1 and therefore must not be
- * spring-smoothed.
+ * outside the panel closes it; so does Escape. Arrow keys move through the
+ * answer's figures without closing: with two or three thumbnails open
+ * comparison is the point, and forcing a close-reopen per figure would punish
+ * it. Everything rides the system's spring tiers and surface tokens; the only
+ * custom motion is the resize drag itself, which follows the pointer 1:1 and
+ * therefore must not be spring-smoothed.
  */
 export function FigureLightbox({
-  figure,
+  figures,
+  index,
+  onIndexChange,
   onClose,
 }: {
-  figure: FigureEvidence;
+  /** Every figure in the answer, in thumbnail order. */
+  figures: FigureEvidence[];
+  /** Which one is shown. Owned by the row, not the dialog. */
+  index: number;
+  onIndexChange: (index: number) => void;
   onClose: () => void;
 }) {
   const shape = useShape();
@@ -66,6 +74,17 @@ export function FigureLightbox({
   const [size, setSize] = useState({ w: 880, h: 640 });
   const dragRef = useRef<ResizeState | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+
+  // Clamp once: a figures array that shrinks under an open dialog (a saved
+  // answer re-rendering mid-view) must not strand the index past the end.
+  const safeIndex =
+    figures.length === 0
+      ? 0
+      : Math.min(Math.max(index, 0), figures.length - 1);
+  const figure = figures[safeIndex];
+
+  const position =
+    figures.length > 1 ? ` (${safeIndex + 1} of ${figures.length})` : "";
 
   const onHandlePointerDown = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {
@@ -98,10 +117,21 @@ export function FigureLightbox({
     dragRef.current = null;
   }, []);
 
-  // Escape closes, and the panel mounts centered on the first frame.
+  // Escape closes; arrows move through the figures. Wrapping, not clamping:
+  // with two or three figures a dead end is a trap, and the position readout
+  // in the title ("2 of 3") says where you are either way. Keyboard movement
+  // is not motion, so reduced motion changes nothing here.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") {
+        onClose();
+      } else if (event.key === "ArrowRight" && figures.length > 1) {
+        event.preventDefault();
+        onIndexChange((safeIndex + 1) % figures.length);
+      } else if (event.key === "ArrowLeft" && figures.length > 1) {
+        event.preventDefault();
+        onIndexChange((safeIndex - 1 + figures.length) % figures.length);
+      }
     };
     document.addEventListener("keydown", onKey);
     document.body.style.overflow = "hidden";
@@ -109,7 +139,13 @@ export function FigureLightbox({
       document.removeEventListener("keydown", onKey);
       document.body.style.overflow = "";
     };
-  }, [onClose]);
+  }, [onClose, onIndexChange, figures.length, safeIndex]);
+
+  // After all hooks: an empty figures array means nothing to show, and hooks
+  // must run in the same order every render.
+  if (!figure) {
+    return null;
+  }
 
   const content = (
     <div className="fixed inset-0 z-50" onClick={onClose}>
@@ -125,8 +161,8 @@ export function FigureLightbox({
           role="dialog"
           aria-modal="true"
           aria-label={
-            figure.caption ||
-            `${MANUALS[figure.docId].code} figure on ${figure.page}`
+            (figure.caption ||
+              `${MANUALS[figure.docId].code} figure on ${figure.page}`) + position
           }
           initial={reduceMotion ? { opacity: 0, scale: 0.96 } : { opacity: 0, scale: 0.96 }}
           animate={{ opacity: 1, scale: 1 }}
@@ -148,6 +184,9 @@ export function FigureLightbox({
             >
               {figure.caption ||
                 `${citeLabel(figure.docId, figure.pageLabel ?? null, figure.chapter ?? null, figure.standard ?? figure.chapter ?? null, figure.sheetOf ?? null, figure.sheetCount ?? null)} figure`}
+              {position ? (
+                <span className="text-muted-foreground">{position}</span>
+              ) : null}
             </span>
             <Button
               type="button"

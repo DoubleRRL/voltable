@@ -327,6 +327,32 @@ is something to send. It rides 160ms, a measured audit token matching the
 moderate tier's timescale. There is no field halo — it was tried and
 rejected.
 
+**The thinking orb is the shared thinking-orbs package, icon only.** The
+`ThinkingOrb` (working state, 20px, auto theme) is the same component the
+calctutor coach uses — one copy of the truth for what "thinking" looks like,
+MIT licensed, no dependencies. No visible word label: a cycling
+Thinking→Moonwalking row took a full row to say what the orb already says, and
+contradicted the one-announcement rule. The single sr-only "Thinking…" stays.
+
+**The figure lightbox pages with arrow keys.** One shared dialog per answer
+row owns the open index; Left/Right wrap through the thumbnails with the
+position in the title ("2 of 3"). Each card used to mount a dialog showing only
+itself, so comparing two drawings meant close-reopen per figure.
+
+**A conditional requirement must be answered conditionally.** "All joint pole
+attachments shall be designed to Grade A" became "Must analyze with Grade A"
+for an Edison-only pole — joint → A promoted to all → A — with the conditional
+rule in context. Prompts alone do not hold this, so `verifyConditionalFidelity`
+sits beside `verifyAnswerNumbers`: quotes condition a requirement, the answer
+claims it without the condition words, the lying headline goes and the quoted
+conditional sentence becomes the headline. Same shape as the numbers verifier,
+same partial cap.
+
+**Planners say Edison; the manuals say SCE.** No alias bridged them, so "only
+edison on the pole" matched pole-marking boilerplate instead of the rule text.
+`edison ↔ sce` both directions; never mapped to "company," which is
+everywhere and would dilute rather than aim.
+
 **Verify UI changes against the staged runtime, never `next dev`.** `next dev`
 in this repo serves SSR HTML whose client chunks do not resolve, so the page
 renders and every handler is dead — a transition that "does nothing" and a

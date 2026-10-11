@@ -12,7 +12,7 @@ import { Collapsible } from "@base-ui/react/collapsible";
 import { motion } from "framer-motion";
 
 import { spring } from "@/lib/springs";
-import { FigureCard } from "./FigureCard";
+import { FigureRow } from "./FigureRow";
 import { EvidenceRail } from "./EvidenceRail";
 import { GroundingBadge } from "./GroundingBadge";
 import { NotCoveredNotice } from "./NotCoveredNotice";
@@ -191,7 +191,7 @@ export function AnswerCard({
             instead of the state; the indicator announces one "Thinking…" to
             assistive tech and shows the morphing glyph to everyone else. */}
         {message.streaming ? (
-          <ThinkingIndicator size="compact" className="px-0 py-0" />
+          <ThinkingIndicator className="px-0 py-0" />
         ) : (
           <GroundingBadge grounding={message.grounding} />
         )}
@@ -230,13 +230,7 @@ export function AnswerCard({
 
       <Exceptions exceptions={message.exceptions} />
 
-      {figures.length > 0 ? (
-        <div className="flex flex-wrap gap-2" aria-label="Figures">
-          {figures.map((figure) => (
-            <FigureCard key={figure.id} figure={figure} />
-          ))}
-        </div>
-      ) : null}
+      {figures.length > 0 ? <FigureRow figures={figures} /> : null}
 
       {hasSources && !message.notCovered ? (
         <div className="border-t border-[color:var(--border)] pt-2">
