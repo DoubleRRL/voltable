@@ -11,6 +11,7 @@ import type {
   VisualAssetTextLayers,
 } from "@/lib/rag/types";
 import { getAppConfig } from "@/lib/env";
+import { SHORTHAND } from "@/lib/rag/lexicon-data";
 
 export type { VisualAsset, StoredException };
 
@@ -267,6 +268,66 @@ const ensureFts = (db: Db) => {
   `);
 };
 
+/**
+ * Corpus lexicon for the deterministic typo corrector (Phase 2).
+ *
+ * One row per typable word seen in RAW chunk text — raw, because the FTS5
+ * index tokenizes with `porter unicode61`, so an fts5vocab table would hold
+ * stems ("field" and "fields" would collapse) rather than the words planners
+ * actually type. `df` is the number of chunks containing the term and weights
+ * correction ties toward the common word. Populated by
+ * `npm run lexicon:build` (scripts/build-lexicon.ts, same builder the ingest
+ * path calls), never in the retrieval hot path.
+ */
+const ensureLexiconTable = (db: Db) => {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS lexicon (
+      term TEXT PRIMARY KEY,
+      df INTEGER NOT NULL
+    );
+  `);
+};
+
+/** Replace the whole lexicon in one transaction. Builder-only. */
+export const replaceLexiconEntries = (entries: Array<{ term: string; df: number }>) => {
+  const db = getDb();
+  const tx = db.transaction(() => {
+    db.exec("DELETE FROM lexicon");
+    const insert = db.prepare("INSERT INTO lexicon (term, df) VALUES (?, ?)");
+    for (const { term, df } of entries) {
+      insert.run(term, df);
+    }
+  });
+  tx();
+};
+
+/** Every lexicon row, for the corrector's in-memory index. */
+export const getLexiconEntries = (): Array<{ term: string; df: number }> => {
+  const db = getDb();
+  try {
+    const rows = db
+      .prepare("SELECT term, df FROM lexicon")
+      .all() as { term: string; df: number }[];
+    return rows.map((r) => ({ term: String(r.term), df: Number(r.df) }));
+  } catch {
+    // Table predates this database file's creation path; the corrector treats
+    // a missing table as an empty lexicon and corrects nothing.
+    return [];
+  }
+};
+
+export const getLexiconCount = (): number => {
+  const db = getDb();
+  try {
+    const row = db.prepare("SELECT COUNT(1) AS count FROM lexicon").get() as {
+      count: number;
+    };
+    return row.count;
+  } catch {
+    return 0;
+  }
+};
+
 const getDbPath = () => {
   const config = getAppConfig();
   // The magic comment is on `process.cwd()` so Turbopack treats this as a
@@ -314,7 +375,8 @@ export const getDb = () => {
   migrateChunksSchema(db);
   ensureVisualAssetsTable(db);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_chunks_pair_group ON chunks (pair_group_id);`);
-  
+  ensureLexiconTable(db);
+
   ensureFts(db);
 
   try {
@@ -987,12 +1049,25 @@ export const getFigureEvidenceForPages = (
   return out;
 };
 
+/**
+ * Pipeline version mixed into the answer-cache key below.
+ *
+ * Bump this on ANY retrieval or prompt change. A cached answer is prose
+ * generated from a specific retrieval result through a specific prompt, so
+ * serving it after either changed replays the old system while reporting the
+ * new one's numbers (this exact failure once read as an answer-recall
+ * regression that did not exist). Old rows are hashed without the version, so
+ * a bump retires them without a cache clear.
+ */
+export const PIPELINE_VERSION = 3;
+
 const cacheKey = (
   question: string,
   visualFirst: boolean,
   conversationPrefix = "",
   extractive = false
 ) =>
+  `v${PIPELINE_VERSION}\n` +
   (visualFirst ? `${question}\n__visualFirst=1` : question) +
   (extractive ? `\n__extractive=1` : "") +
   (conversationPrefix.trim() ? `\n__thread=${conversationPrefix.trim()}` : "");
@@ -1001,7 +1076,8 @@ export const getCacheEntry = (
   question: string,
   visualFirst = false,
   conversationPrefix = "",
-  extractive = false
+  extractive = false,
+  ttlSeconds = getAppConfig().EMBEDDING_CACHE_TTL_SECONDS
 ): unknown | null => {
   const db = getDb();
   const hash = crypto
@@ -1009,10 +1085,17 @@ export const getCacheEntry = (
     .update(cacheKey(question, visualFirst, conversationPrefix, extractive))
     .digest("hex");
   const row = db
-    .prepare("SELECT response_json FROM query_cache WHERE query_hash = ?")
-    .get(hash) as { response_json: string } | undefined;
+    .prepare("SELECT response_json, created_at FROM query_cache WHERE query_hash = ?")
+    .get(hash) as { response_json: string; created_at: number } | undefined;
 
   if (!row) {
+    return null;
+  }
+
+  // The writer sweeps expired rows on save, but a row written under a long
+  // TTL (or just before a TTL shortening) would otherwise serve stale prose
+  // indefinitely. A stale hit is a miss: the caller regenerates.
+  if (!Number.isFinite(row.created_at) || Date.now() - row.created_at > ttlSeconds * 1000) {
     return null;
   }
 
@@ -1070,32 +1153,9 @@ const FTS_STOPWORDS = new Set([
 ]);
 
 /**
- * Planner shorthand, expanded before tokenizing. A question like "2' from
- * p/l" would otherwise evaporate: the tokenizer drops "2", "p" and "l" as
- * too short, deleting both the distance and the most distinctive noun. The
- * same expansion runs on chunk text at scoring time, so "3'-0"" and "3 feet"
- * meet on the same token. Slash abbreviations are standard utility
- * shorthand, and prime marks are how every planner writes feet and inches.
+ * Planner shorthand lives in lexicon-data.ts (data, not code). Imported here
+ * for query expansion; a new shorthand shape is a data edit in that file.
  */
-const SHORTHAND: Array<[RegExp, string]> = [
-  [/\bp\/l\b/gi, "property line"],
-  [/\bp\.l\./gi, "property line"],
-  [/\bo\/h\b/gi, "overhead"],
-  [/\bo\.h\./gi, "overhead"],
-  [/\bu\/g\b/gi, "underground"],
-  [/\bu\.g\./gi, "underground"],
-  [/\boh\b/gi, "overhead"],
-  [/\bug\b/gi, "underground"],
-  // Pole class shorthand: planners write cl-4, cl 3; the manuals write
-  // "Class 4", "Class 3". Bare "cl" is left alone — in drawings it can mean
-  // centerline — but cl-plus-a-digit is always a class.
-  [/\bcl[-\s]?([1-9])\b/gi, "class $1"],
-  // Species shorthand: dftb is Douglas Fir through-bored, written DF-TB
-  // (tokenized to df + tb) or spelled out in the manuals.
-  [/\bdftb\b/gi, "douglas fir through bored df tb"],
-  [/(\d+(?:\.\d+)?)\s*['′]/g, "$1 feet"],
-  [/(\d+(?:\.\d+)?)\s*["″]/g, "$1 inches"],
-];
 
 export const expandShorthand = (raw: string): string => {
   let out = raw;

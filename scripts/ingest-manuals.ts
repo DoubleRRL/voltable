@@ -24,6 +24,7 @@ import {
   footerRulesFor,
   type ManualId,
 } from "@/lib/rag/docs";
+import { buildLexicon } from "./build-lexicon";
 
 /**
  * Ingest SCE manuals from MinerU layout output.
@@ -851,6 +852,12 @@ const main = async () => {
   }
   // No final FTS rebuild: upsertChunks keeps the index in step per document.
   // rebuildChunkFtsIndex() remains for first-build repair only.
+  // The typo-corrector lexicon is corpus-wide, so it rebuilds once from all
+  // chunks after every ingest run (same builder as `npm run lexicon:build`).
+  const lexicon = buildLexicon();
+  console.log(
+    `[ingest] lexicon: ${lexicon.terms} terms from ${lexicon.chunks} chunks`
+  );
   console.log(
     `[ingest] done: ${ids.map((i) => MANUALS[i].code).join(" + ")} · ` +
       `${totals.chunks} chunks · ${totals.assets} assets · ${((Date.now() - started) / 1000).toFixed(1)}s`

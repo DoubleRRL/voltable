@@ -3,6 +3,7 @@ import {
   expandShorthand,
   ftsQueryTokens,
   getAssetsForChunkIds,
+  getLexiconEntries,
   getManualAffinity,
   searchTablesByMeasure,
   getChunksByPairGroup,
@@ -12,6 +13,7 @@ import {
 } from "@/lib/rag/storage";
 import { getAppConfig } from "@/lib/env";
 import { manualsNamedIn } from "@/lib/rag/docs";
+import { UNIT_ALIASES } from "@/lib/rag/lexicon-data";
 import { extractMeasurements, measureKey } from "./measure";
 
 export { getAssetsForChunkIds };
@@ -58,6 +60,116 @@ const FIGURE_WORDS = [
   "photo", "shown", "show me", "look like", "illustrates",
 ];
 
+/**
+ * Deterministic typo/shorthand correction in front of retrieval.
+ *
+ * Only tokens NOT already in the corpus lexicon are ever rewritten — "pool"
+ * and "pole" are both real words, so a token that is already known is left
+ * alone no matter how close a neighbour sits. An unknown token is replaced by
+ * its Damerau-Levenshtein distance-1 neighbour (one insertion, deletion,
+ * substitution, or adjacent transposition), weighted by document frequency
+ * with ties broken alphabetically, so the choice is fully deterministic.
+ * Tokens carrying digits (measurements, sheet ids, pole numbers) are never
+ * rewritten: digits match nothing by accident and everything by design.
+ *
+ * Cost is O(54·L) hash lookups, not O(corpus): instead of scanning every
+ * lexicon term near the query token's length, generate every string at
+ * distance 1 and look each up in the byTerm map. A bucket scan cost ~11ms
+ * per question (21k terms, wide buckets); variant generation is sub-ms.
+ */
+type LexiconIndex = {
+  byTerm: Map<string, number>;
+};
+
+let cachedLexiconIndex: LexiconIndex | null = null;
+
+const getLexiconIndex = (): LexiconIndex => {
+  if (cachedLexiconIndex) {
+    return cachedLexiconIndex;
+  }
+  const byTerm = new Map<string, number>();
+  for (const { term, df } of getLexiconEntries()) {
+    byTerm.set(term, df);
+  }
+  cachedLexiconIndex = { byTerm };
+  return cachedLexiconIndex;
+};
+
+/** Every lowercase string at Damerau-Levenshtein distance 1 from `token`. */
+const oneEditVariants = (token: string): string[] => {
+  const out: string[] = [];
+  const n = token.length;
+  for (let i = 0; i < n; i += 1) out.push(token.slice(0, i) + token.slice(i + 1));
+  for (let i = 0; i <= n; i += 1) {
+    for (let c = 97; c <= 122; c += 1) {
+      const ch = String.fromCharCode(c);
+      out.push(token.slice(0, i) + ch + token.slice(i));
+    }
+  }
+  for (let i = 0; i < n; i += 1) {
+    for (let c = 97; c <= 122; c += 1) {
+      const ch = String.fromCharCode(c);
+      if (ch === token[i]) continue;
+      out.push(token.slice(0, i) + ch + token.slice(i + 1));
+    }
+  }
+  for (let i = 0; i < n - 1; i += 1) {
+    out.push(token.slice(0, i) + token[i + 1] + token[i] + token.slice(i + 2));
+  }
+  return out;
+};
+
+/** Minimum token length the corrector attempts. Shorter tokens are looked up, never rewritten. */
+const MIN_CORRECT_LENGTH = 3;
+
+export const correctToken = (token: string): string => {
+  if (token.length < MIN_CORRECT_LENGTH) return token;
+  if (/\d/.test(token)) return token;
+  const { byTerm } = getLexiconIndex();
+  if (byTerm.has(token)) return token;
+  let best: string | null = null;
+  let bestDf = -1;
+  for (const variant of oneEditVariants(token)) {
+    const df = byTerm.get(variant);
+    if (df === undefined) continue;
+    if (df > bestDf || (df === bestDf && variant < (best ?? "￿"))) {
+      best = variant;
+      bestDf = df;
+    }
+  }
+  return best ?? token;
+};
+
+/**
+ * The question's FTS tokens with typos corrected. Corrected tokens flow into
+ * BOTH the FTS MATCH query and the coverage scorer's contentTokens, so the
+ * gate reads the user's corrected words. Re-tokenizing the corrected string
+ * re-applies the length/stopword/cap rules identically, so a correction that
+ * lands on a stopword ("shal" → "shall") is filtered exactly as if typed.
+ */
+export const correctedFtsTokens = (raw: string): string[] => {
+  const first = ftsQueryTokens(raw);
+  if (first.length === 0) return first;
+  let changed = false;
+  const fixed = first.map((token) => {
+    const next = correctToken(token);
+    if (next !== token) changed = true;
+    return next;
+  });
+  if (!changed) return first;
+  return ftsQueryTokens(fixed.join(" "));
+};
+
+/** Original → corrected mapping for a question, for debugging and residuals. */
+export const correctionsFor = (raw: string): Record<string, string> => {
+  const out: Record<string, string> = {};
+  for (const token of ftsQueryTokens(raw)) {
+    const fixed = correctToken(token);
+    if (fixed !== token) out[token] = fixed;
+  }
+  return out;
+};
+
 export type QueryIntent = {
   /** Question asks for a figure/table or a measured value. */
   visualIntent: boolean;
@@ -74,7 +186,10 @@ export type QueryIntent = {
 
 export const analyzeQuery = (question: string, visualFirst = false): QueryIntent => {
   const lowered = question.toLowerCase();
-  const contentTokens = ftsQueryTokens(question);
+  // Corrected words: the coverage gate reads what the user meant, not the
+  // typo. The denominator stays on corrected own-words — aliases only ever
+  // add numerator hits, never denominator terms.
+  const contentTokens = correctedFtsTokens(question);
   const tokens = tokenize(question);
   const approvalIntent = APPROVAL_PATTERN.test(question);
 
@@ -93,85 +208,9 @@ export const analyzeQuery = (question: string, visualFirst = false): QueryIntent
 };
 
 /**
- * ESR-domain synonyms.
- *
- * The ESR writes units as symbols ("mG", "ft", "1φ", "kVA") while users type
- * them as words ("milligauss", "feet", "single phase"), and it writes verdicts
- * as nouns ("Acceptability") while users ask with adjectives ("acceptable",
- * "approved"). Without this the highest-value chunks were unreachable: a
- * question about "milligauss" scored zero coverage against a figure whose
- * only text was "MAX B = 12 mG", and a question asking whether 301A is
- * "acceptable" scored 1/3 against a table whose header says "Acceptability" —
- * so the whole query fell below the coverage gate while two chunks each
- * covered two thirds of it.
- *
- * Applied to both the question and the chunk text at scoring time, so no
- * re-index is needed to benefit.
+ * ESR-domain synonyms live in lexicon-data.ts (data, not code). Imported
+ * here for scoring; a new synonym is a data edit in that file.
  */
-const UNIT_ALIASES: Record<string, string[]> = {
-  milligauss: ["mg", "maximum"],
-  approved: ["acceptable", "acceptability", "approval"],
-  acceptable: ["approved", "acceptability", "approval"],
-  acceptability: ["acceptable", "approved"],
-  approval: ["approved", "acceptable"],
-  approvals: ["approved", "acceptable"],
-  unapproved: ["unacceptable"],
-  pool: ["pools", "swimming"],
-  pools: ["pool", "swimming"],
-  swimming: ["pool", "pools"],
-  // Plurals the corpus never uses: planners ask "guys" and "multiplex",
-  // the manuals write "guy" and "duplex/triplex/quadruplex".
-  guys: ["guy"],
-  guy: ["guys"],
-  multiplex: ["duplex", "triplex", "quadruplex"],
-  duplex: ["multiplex"],
-  triplex: ["multiplex"],
-  quadruplex: ["multiplex"],
-  // Crew shorthand, per planner vocabulary: oh/ug/pri/sec/svc/str/pad.
-  // Short-to-long covers typed shorthand ("pri" against "primary"); the
-  // reverse covers OCR and figure callouts that abbreviate ("Pri.", "Svc.").
-  // Company name the same way, both directions: the manuals say SCE and
-  // Company, planners say Edison. Without it "only edison on the pole"
-  // matches pole-marking boilerplate ("Edison Poles" bands) instead of the
-  // rule text that governs the pole, because the rule text never says Edison.
-  // Deliberately not mapped to "company": that word is everywhere and would
-  // dilute rather than aim.
-  edison: ["sce"],
-  sce: ["edison"],
-  pri: ["primary"],
-  primary: ["pri"],
-  sec: ["secondary"],
-  secondary: ["sec"],
-  svc: ["service"],
-  service: ["svc"],
-  str: ["structure", "street"],
-  structure: ["str"],
-  pad: ["padmount"],
-  padmount: ["pad"],
-  eqmt: ["equipment"],
-  equipment: ["eqmt"],
-  gauss: ["mg", "milligauss"],
-  maximum: ["max", "mg", "milligauss"],
-  max: ["maximum", "mg"],
-  reading: ["read", "max"],
-  magnetic: ["field", "max", "mg"],
-  feet: ["ft", "foot"],
-  foot: ["ft", "feet"],
-  inches: ["in", "inch"],
-  inch: ["in", "inches"],
-  volts: ["v", "volt", "volts"],
-  volt: ["v", "volts"],
-  voltage: ["v", "volts", "volt"],
-  amps: ["a", "amp", "amperes", "ampere"],
-  amperes: ["a", "amp", "ampere"],
-  ampere: ["a", "amp", "amperes"],
-  amperage: ["a", "amp", "amperes", "ampere"],
-  kilovolts: ["kv"],
-  kilovolt: ["kv"],
-  phase: ["ph"],
-  hertz: ["hz"],
-  percent: ["pct"],
-};
 
 /**
  * Expand the question's tokens with ESR-domain synonyms.
@@ -393,6 +432,14 @@ export const retrieveChunks = async (
   const { visualFirst = false } = options;
   const config = getAppConfig();
   const intent = analyzeQuery(question, visualFirst);
+  // The corrected lexical view of the question: typo'd tokens match nothing
+  // in the index, so retrieval and the manual-affinity pass both read the
+  // corrected words. Re-tokenization is the identity on corrected tokens
+  // (correctedFtsTokens already filtered them), so this is exactly the FTS
+  // query over the corrected token list. Measures, visual triggers, and
+  // named-manual detection stay on the raw question: numbers are never
+  // corrected, and a named manual is an explicit constraint, not a typo.
+  const correctedFtsQuery = intent.contentTokens.join(" ");
 
   const empty = {
     candidates: [] as RetrievalResult[],
@@ -407,7 +454,7 @@ export const retrieveChunks = async (
     },
   };
 
-  const ftsHits = searchChunksFts(question, FTS_CANDIDATES);
+  const ftsHits = searchChunksFts(correctedFtsQuery, FTS_CANDIDATES);
   // Tables carrying the question's measurements join candidates on their own
   // merit: prose-length competition buries lookup tables past any rank a
   // re-scorer can reach (Table 10-45 sat at 586). Deduped below; the scorer —
@@ -430,7 +477,7 @@ export const retrieveChunks = async (
   // Which manual is this question about? Computed from a grouped FTS pass over
   // a wider slice than the candidates use, so a manual that answers well but
   // ranks low on blended score still gets its say.
-  const affinityRows = getManualAffinity(question);
+  const affinityRows = getManualAffinity(correctedFtsQuery);
   const manualPrior = new Map<string, number>();
   if (affinityRows.length > 1) {
     const best = Math.max(...affinityRows.map((r) => r.hits)) || 1;

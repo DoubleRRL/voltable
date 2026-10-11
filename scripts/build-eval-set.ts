@@ -235,6 +235,7 @@ const pad3 = (value: number) => String(value).padStart(3, "0");
 
 type FigureRow = {
   id: string;
+  docId: string;
   page: number;
   chapter: string | null;
   section_path: string | null;
@@ -402,6 +403,7 @@ const SECTION_UNIT_BOUND: Record<string, { min: number; max: number }> = {
 
 type BodyChunkRow = {
   id: string;
+  docId: string;
   page: number;
   chapter: string | null;
   section: string | null;
@@ -533,9 +535,9 @@ const readDb = (dbPath: string) => {
 const loadFigures = (db: Database.Database): FigureRow[] => {
   const rows = db
     .prepare(
-      `SELECT id, page, chapter, section_path, caption, kind, text_layers_json
-         FROM visual_assets
-        ORDER BY page ASC, id ASC`
+      `SELECT id, doc_id, page, chapter, section_path, caption, kind, text_layers_json
+          FROM visual_assets
+         ORDER BY page ASC, id ASC`
     )
     .all() as Array<Record<string, unknown>>;
 
@@ -553,6 +555,7 @@ const loadFigures = (db: Database.Database): FigureRow[] => {
     const ocr = typeof layers.ocr === "string" ? layers.ocr : "";
     out.push({
       id: String(row.id),
+      docId: String(row.doc_id ?? "esr"),
       page: Number(row.page),
       chapter: row.chapter ? String(row.chapter) : null,
       section_path: row.section_path ? String(row.section_path) : null,
@@ -567,14 +570,15 @@ const loadFigures = (db: Database.Database): FigureRow[] => {
 const loadBodyChunks = (db: Database.Database): BodyChunkRow[] => {
   const rows = db
     .prepare(
-      `SELECT id, page, chapter, section, text
-         FROM chunks
-        WHERE chunk_role = 'body' AND evidence_type = 'paragraph'
-        ORDER BY page ASC, id ASC`
+      `SELECT id, doc_id, page, chapter, section, text
+          FROM chunks
+         WHERE chunk_role = 'body' AND evidence_type = 'paragraph'
+         ORDER BY page ASC, id ASC`
     )
     .all() as Array<Record<string, unknown>>;
   return rows.map((row) => ({
     id: String(row.id),
+    docId: String(row.doc_id ?? "esr"),
     page: Number(row.page),
     chapter: row.chapter ? String(row.chapter) : null,
     section: row.section ? String(row.section) : null,
@@ -664,6 +668,7 @@ const main = () => {
         question: draft.question,
         goldChapters: figure.chapter ? [figure.chapter] : [],
         goldPages: [figure.page],
+        goldLocs: [{ docId: figure.docId, page: figure.page }],
         mustInclude: draft.mustInclude,
         kind: "figure-fact",
         notes: `${draft.notes} Asset ${figure.id} (${figure.kind}).`,
@@ -689,6 +694,7 @@ const main = () => {
       question: draft.question,
       goldChapters: chunk.chapter ? [chunk.chapter] : [],
       goldPages: [chunk.page],
+      goldLocs: [{ docId: chunk.docId, page: chunk.page }],
       mustInclude: draft.mustInclude,
       kind: "section-fact",
       notes: `${draft.notes} Chunk ${chunk.id}.`,
@@ -708,6 +714,7 @@ const main = () => {
       question: entry.question,
       goldChapters: [],
       goldPages: [],
+      goldLocs: [],
       mustInclude: [],
       kind: "unanswerable",
       notes: entry.notes,

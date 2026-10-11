@@ -10,11 +10,42 @@ export type EvalKind = "figure-fact" | "section-fact" | "unanswerable";
 
 export type EvalConfidence = "high" | "medium" | "low";
 
+/**
+ * A citable location: a page number is only unique inside a manual (page 36
+ * exists in all five), so every gold and every retrieved hit carries its
+ * manual. Bare-page matching scored a UGS vault drawing as a hit on an ESR
+ * question.
+ */
+export type EvalLoc = {
+  docId: string;
+  page: number;
+};
+
+/** One prior turn of a thread a follow-up question is asked in. */
+export type EvalThreadTurn = {
+  role: "user" | "assistant";
+  text: string;
+};
+
 export type EvalItem = {
   id: string;
   question: string;
   goldChapters: string[];
+  /** Legacy bare pages. Kept for readability; scoring uses goldLocs. */
   goldPages: number[];
+  /**
+   * Gold locations as {docId, page} pairs. Present on every item; when absent
+   * (a golden written before pairs existed) the scorer falls back to treating
+   * goldPages as ESR pages, which is all the old builder ever produced.
+   */
+  goldLocs?: EvalLoc[];
+  /**
+   * Prior turns for a follow-up question. Default (absent/empty) is current
+   * behaviour: the question is asked standalone. When present the harness
+   * builds the same conversationPrefix the app would and threads it through
+   * the retrieval query, the answer call and the cache key.
+   */
+  thread?: EvalThreadTurn[];
   mustInclude: string[];
   kind: EvalKind;
   notes: string;

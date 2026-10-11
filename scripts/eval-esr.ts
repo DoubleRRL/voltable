@@ -35,6 +35,8 @@ import type {
   EvalGoldenFile,
   EvalItem,
   EvalKind,
+  EvalLoc,
+  EvalThreadTurn,
   EvalThresholdsFile,
 } from "./eval-set-types";
 
@@ -247,6 +249,7 @@ type ItemOutcome = {
   confidence: EvalConfidence;
   question: string;
   goldPages: number[];
+  goldLocs: EvalLoc[];
   goldChapters: string[];
   mustInclude: string[];
   expectNotCovered: boolean;
@@ -254,13 +257,14 @@ type ItemOutcome = {
     ok: boolean;
     error?: string;
     latencyMs: number;
-    topPages: number[];
+    topLocs: EvalLoc[];
     topChapters: string[];
     confidence: number;
     intent: string;
     notCovered: boolean;
     hitAt1: boolean;
     hitAt3: boolean;
+    wrongManualTop1: boolean;
     chapterHitAt1: boolean;
     presentInContext: string[];
     missingFromContext: string[];
@@ -270,31 +274,97 @@ type ItemOutcome = {
   failureReasons: string[];
 };
 
+const fmtLoc = (loc: EvalLoc): string => `${loc.docId}:${loc.page}`;
+
+/**
+ * Gold locations as {docId, page} pairs. A golden written before pairs
+ * existed carries only bare goldPages, and the old builder only ever knew the
+ * ESR, so those fall back to ESR pages. Scoring never uses bare pages.
+ */
+const goldLocsOf = (item: EvalItem): EvalLoc[] =>
+  item.goldLocs ?? item.goldPages.map((page) => ({ docId: "esr", page }));
+
+/** The app builds this string in normalizeChatPayload; the shape is User:/Assistant: lines. */
+const conversationPrefixOf = (thread: EvalThreadTurn[] | undefined): string =>
+  (thread ?? [])
+    .map((turn) => `${turn.role === "assistant" ? "Assistant" : "User"}: ${turn.text}`)
+    .join("\n");
+
+/**
+ * Mirror of the anaphora/short-question merge in pipeline.ts
+ * `buildRetrievalQuery`, for the eval's retrieval call.
+ *
+ * This is duplicated deliberately: retrieveChunks takes no conversationPrefix
+ * (the merge lives in the answer path, which the eval must not change), so
+ * the eval replays the same merge to test the follow-up path honestly. If the
+ * two ever drift the follow-up items score differently, which is visible,
+ * rather than quietly testing standalone questions.
+ */
+const ANAPHORA_RE = /\b(it|they|them|he|she|him|her|its|their|theirs)\b/i;
+
+const buildEvalRetrievalQuery = (question: string, conversationPrefix: string): string => {
+  const words = question.trim().split(/\s+/).filter(Boolean);
+  const prefix = conversationPrefix.trim();
+  if (!prefix || (words.length >= 6 && !ANAPHORA_RE.test(question))) {
+    return question;
+  }
+  const lines = [...prefix.matchAll(/^(?:User|Assistant):\s*(.+)$/gim)].map((m) =>
+    m[1].trim()
+  );
+  const tail = lines.slice(-3).join(" ");
+  return `${tail} ${question}`.trim().slice(0, 1200);
+};
+
 /**
  * Mirror of the cache key in storage.ts `cacheKey`, for the eval's defaults
- * (extractive=false, no thread).
+ * (extractive=false).
  *
  * This is duplicated deliberately: the cache-hit flag decides whether the
  * answer-path numbers are cold or warm, and asking the pipeline would mean
  * changing src/lib/rag. If the two ever drift the flag reads "unknown", which is
  * visible, rather than quietly reporting the wrong thing.
+ *
+ * EVAL_PIPELINE_VERSION must stay in sync with PIPELINE_VERSION in
+ * src/lib/rag/storage.ts: bump both on any retrieval or prompt change, or the
+ * flag will read cold for answers the pipeline served warm (and vice versa).
  */
-const answerCacheKey = (question: string, visualFirst: boolean): string =>
-  question + (visualFirst ? "\n__visualFirst=1" : "");
+const EVAL_PIPELINE_VERSION = 2;
 
-const isAnswerCached = (dbPath: string, question: string, visualFirst: boolean): boolean | null => {
+const answerCacheKey = (
+  question: string,
+  visualFirst: boolean,
+  conversationPrefix = ""
+): string =>
+  `v${EVAL_PIPELINE_VERSION}\n` +
+  question +
+  (visualFirst ? "\n__visualFirst=1" : "") +
+  (conversationPrefix.trim() ? `\n__thread=${conversationPrefix.trim()}` : "");
+
+const isAnswerCached = (
+  dbPath: string,
+  question: string,
+  visualFirst: boolean,
+  conversationPrefix = ""
+): boolean | null => {
   try {
     if (!fs.existsSync(dbPath)) return null;
     const db = new Database(dbPath, { readonly: true, fileMustExist: true });
     try {
       const hash = crypto
         .createHash("sha256")
-        .update(answerCacheKey(question, visualFirst))
+        .update(answerCacheKey(question, visualFirst, conversationPrefix))
         .digest("hex");
-      const row = db.prepare("SELECT 1 AS hit FROM query_cache WHERE query_hash = ?").get(hash) as
-        | { hit: number }
-        | undefined;
-      return row !== undefined;
+      const row = db
+        .prepare("SELECT 1 AS hit, created_at FROM query_cache WHERE query_hash = ?")
+        .get(hash) as { hit: number; created_at: number } | undefined;
+      if (row === undefined) return false;
+      // Mirror of the read-path TTL in storage.ts getCacheEntry: a stale row
+      // is a miss for the pipeline, so it is warm=false for the eval too.
+      const ttlSeconds = getAppConfig().EMBEDDING_CACHE_TTL_SECONDS;
+      if (!Number.isFinite(row.created_at) || Date.now() - row.created_at > ttlSeconds * 1000) {
+        return false;
+      }
+      return true;
     } finally {
       db.close();
     }
@@ -332,13 +402,21 @@ const evaluateItem = async (
   const failureReasons: string[] = [];
   const expectNotCovered = item.expectNotCovered === true;
   const visualFirst = item.kind === "figure-fact";
+  const goldLocs = goldLocsOf(item);
+  const goldDocs = new Set(goldLocs.map((loc) => loc.docId));
+  const conversationPrefix = conversationPrefixOf(item.thread);
 
   const retrieval = await (async () => {
     const started = Date.now();
     try {
-      const result = await retrieveChunks(item.question, { visualFirst });
+      const result = await retrieveChunks(buildEvalRetrievalQuery(item.question, conversationPrefix), {
+        visualFirst,
+      });
       const candidates = result.candidates;
-      const pages = candidates.map((candidate) => candidate.chunk.page);
+      const locs: EvalLoc[] = candidates.map((candidate) => ({
+        docId: candidate.chunk.docId,
+        page: candidate.chunk.page,
+      }));
       const chapters = candidates.map((candidate) => candidate.chunk.chapter ?? "");
       const context = candidates
         .map((candidate) => candidate.chunk.text)
@@ -354,13 +432,21 @@ const evaluateItem = async (
       return {
         ok: true as const,
         latencyMs: Date.now() - started,
-        topPages: pages.slice(0, 5),
+        topLocs: locs.slice(0, 5),
         topChapters: chapters.slice(0, 5),
         confidence: result.summary.confidence,
         intent: result.summary.intent.trigger,
         notCovered: result.summary.notCovered,
-        hitAt1: pages[0] !== undefined && item.goldPages.includes(pages[0] as number),
-        hitAt3: pages.slice(0, 3).some((page) => item.goldPages.includes(page)),
+        hitAt1:
+          locs[0] !== undefined &&
+          goldLocs.some((gold) => gold.docId === locs[0]?.docId && gold.page === locs[0]?.page),
+        hitAt3: locs
+          .slice(0, 3)
+          .some((loc) => goldLocs.some((gold) => gold.docId === loc.docId && gold.page === loc.page)),
+        // A page number alone is not evidence: page 36 exists in all five
+        // manuals, so a top-1 from the wrong manual is a miss with a name.
+        wrongManualTop1:
+          goldLocs.length > 0 && locs[0] !== undefined && !goldDocs.has(locs[0]?.docId as string),
         chapterHitAt1:
           chapters[0] !== undefined && item.goldChapters.includes(chapters[0] as string),
         presentInContext: present,
@@ -371,13 +457,14 @@ const evaluateItem = async (
         ok: false as const,
         error: error instanceof Error ? `${error.constructor.name}: ${error.message}` : String(error),
         latencyMs: Date.now() - started,
-        topPages: [] as number[],
+        topLocs: [] as EvalLoc[],
         topChapters: [] as string[],
         confidence: 0,
         intent: "error",
         notCovered: false,
         hitAt1: false,
         hitAt3: false,
+        wrongManualTop1: false,
         chapterHitAt1: false,
         presentInContext: [] as string[],
         missingFromContext: item.mustInclude,
@@ -391,27 +478,27 @@ const evaluateItem = async (
     if (!retrieval.notCovered) {
       failureReasons.push(
         `retrieval claimed coverage for an out-of-scope question ` +
-          `(confidence ${retrieval.confidence.toFixed(3)}, top pages ${retrieval.topPages.join(",")})`
+          `(confidence ${retrieval.confidence.toFixed(3)}, top locs ${retrieval.topLocs.map(fmtLoc).join(",")})`
       );
     }
   } else {
     if (!retrieval.hitAt1) {
       failureReasons.push(
-        `hit@1 miss: gold page(s) ${item.goldPages.join(",")}, got ${retrieval.topPages.join(",") || "none"}`
+        `hit@1 miss: gold ${goldLocs.map(fmtLoc).join(",")}, got ${retrieval.topLocs.map(fmtLoc).join(",") || "none"}`
       );
     }
     if (!retrieval.hitAt3) {
-      failureReasons.push(`hit@3 miss: gold page(s) ${item.goldPages.join(",")}`);
+      failureReasons.push(`hit@3 miss: gold ${goldLocs.map(fmtLoc).join(",")}`);
     }
   }
 
   let answer: AnswerOutcome | null = null;
   if (runAnswerPath) {
     const requestTimeoutMs = getAppConfig().REQUEST_TIMEOUT_MS;
-    const cachedBefore = isAnswerCached(dbPath, item.question, visualFirst);
+    const cachedBefore = isAnswerCached(dbPath, item.question, visualFirst, conversationPrefix);
     const started = Date.now();
     try {
-      const result = await askQuestionWithRag(item.question, visualFirst);
+      const result = await askQuestionWithRag(item.question, visualFirst, conversationPrefix);
       const latencyMs = Date.now() - started;
       const answerText = `${result.answer}\n${result.directAnswer}\n${result.citations
         .map((citation) => citation.quote)
@@ -488,6 +575,7 @@ const evaluateItem = async (
     confidence: item.confidence,
     question: item.question,
     goldPages: item.goldPages,
+    goldLocs,
     goldChapters: item.goldChapters,
     mustInclude: item.mustInclude,
     expectNotCovered,
@@ -510,6 +598,8 @@ type Bucket = {
   retrievalErrors: number;
   hitAt1: number;
   hitAt3: number;
+  wrongManualTop1: number;
+  wrongManualAssessed: number;
   chapterHitAt1: number;
   notCoveredItems: number;
   notCoveredSignalled: number;
@@ -529,6 +619,8 @@ const emptyBucket = (): Bucket => ({
   retrievalErrors: 0,
   hitAt1: 0,
   hitAt3: 0,
+  wrongManualTop1: 0,
+  wrongManualAssessed: 0,
   chapterHitAt1: 0,
   notCoveredItems: 0,
   notCoveredSignalled: 0,
@@ -548,6 +640,13 @@ const fold = (bucket: Bucket, outcome: ItemOutcome): void => {
   if (!outcome.retrieval.ok) bucket.retrievalErrors += 1;
   if (outcome.retrieval.hitAt1) bucket.hitAt1 += 1;
   if (outcome.retrieval.hitAt3) bucket.hitAt3 += 1;
+  // Unanswerable items have no gold manual, and a retrieval error has no
+  // top-1, so neither is assessed: this is a fraction over answerable items
+  // with a top-1, not over the whole set.
+  if (outcome.retrieval.ok && outcome.goldLocs.length > 0 && outcome.retrieval.topLocs.length > 0) {
+    bucket.wrongManualAssessed += 1;
+    if (outcome.retrieval.wrongManualTop1) bucket.wrongManualTop1 += 1;
+  }
   if (outcome.retrieval.chapterHitAt1) bucket.chapterHitAt1 += 1;
   if (outcome.expectNotCovered) {
     bucket.notCoveredItems += 1;
@@ -571,6 +670,7 @@ type BucketSummary = {
   retrievalErrors: number;
   hitAt1: number;
   hitAt3: number;
+  wrongManualTop1: number | null;
   chapterHitAt1: number;
   mustIncludeRecall: number | null;
   mustIncludeRecallInContext: number | null;
@@ -588,6 +688,10 @@ const summarise = (bucket: Bucket): BucketSummary => ({
   retrievalErrors: bucket.retrievalErrors,
   hitAt1: Number(ratio(bucket.hitAt1, bucket.items).toFixed(4)),
   hitAt3: Number(ratio(bucket.hitAt3, bucket.items).toFixed(4)),
+  wrongManualTop1:
+    bucket.wrongManualAssessed > 0
+      ? Number(ratio(bucket.wrongManualTop1, bucket.wrongManualAssessed).toFixed(4))
+      : null,
   chapterHitAt1: Number(ratio(bucket.chapterHitAt1, bucket.items).toFixed(4)),
   mustIncludeRecall:
     bucket.answered > 0 && bucket.mustIncludeStrings > 0
@@ -791,10 +895,15 @@ const run = async () => {
   }
 
   const retrievalLatency = outcomes.map((outcome) => outcome.retrieval.latencyMs);
-  const answerLatency = outcomes
+  const answersMeasured = outcomes
     .map((outcome) => outcome.answer)
-    .filter((answer): answer is AnswerOutcome => answer !== null)
-    .map((answer) => answer.latencyMs);
+    .filter((answer): answer is AnswerOutcome => answer !== null);
+  // A served-from-cache answer measures SQLite, not the pipeline: its latency
+  // is a cache-hit artefact, and mixing it into the percentiles lets a warm
+  // cache read as a fast model. Only cold answers describe the answer path.
+  const coldAnswers = answersMeasured.filter((answer) => answer.servedFromCache !== true);
+  const answerLatency = coldAnswers.map((answer) => answer.latencyMs);
+  const answerColdN = coldAnswers.length;
 
   // --- gates --------------------------------------------------------------
   const gates: GateResult[] = [];
@@ -986,7 +1095,20 @@ const run = async () => {
   );
   const answerLatencySummary = percentiles(answerLatency);
   console.log(
-    `answer    latency ms  p50 ${answerLatencySummary.p50}  p95 ${answerLatencySummary.p95}  max ${answerLatencySummary.max}`
+    `answer    latency ms (cold n=${answerColdN} of ${overall.answered} answers)  p50 ${answerLatencySummary.p50}  p95 ${answerLatencySummary.p95}  max ${answerLatencySummary.max}`
+  );
+  if (overall.answered > 0 && answerColdN < 8) {
+    console.log(
+      `[eval-esr] WARNING only ${answerColdN} of ${overall.answered} answers were cold ` +
+        `(the rest were served from the query cache). Cold percentiles over fewer than 8 ` +
+        `samples are noise: clear stale cache rows or re-run after a pipeline change to ` +
+        `measure the real answer path.`
+    );
+  }
+  console.log(
+    `wrong-manual top-1: ${overallSummary.wrongManualTop1 === null ? "n/a" : pct(overallSummary.wrongManualTop1)} ` +
+      `of answerable items (${overall.wrongManualTop1}/${overall.wrongManualAssessed} ` +
+      `put a wrong manual's page at rank 1; reported, not gated)`
   );
   console.log(
     `mustInclude strings present in retrieved context: ${
@@ -1040,6 +1162,7 @@ const run = async () => {
       detail: probe.detail,
       waived: options.allowMissingLlm,
       sampleSize: overall.answered,
+      coldSampleSize: answerColdN,
       servedFromCache: overall.answerCacheHits,
       requestTimeoutMs: config.REQUEST_TIMEOUT_MS,
       requestTimeoutStrikes: overall.answerTimeoutStrikes,

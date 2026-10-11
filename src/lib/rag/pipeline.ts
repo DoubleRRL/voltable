@@ -1030,15 +1030,165 @@ const resolveTableCode = (question: string, chunks: RetrievalChunk[]): TableVerd
   return null;
 };
 
+/**
+ * Table window for the model prompt: never truncate a table mid-row.
+ *
+ * `PROMPT_SNIPPET_LEN` slices every chunk at 650 chars; measured 523 of 3,161
+ * table chunks exceed that, and a cut can land mid-row — asking the model to
+ * read a row it cannot see. A table chunk is therefore sent as a window
+ * instead of a slice:
+ *
+ *   title line(s) + header row(s) + matched data row(s) + same-page legend lines
+ *
+ * Row matching reuses the question's extracted measures (measure.ts, the same
+ * no-conversion key discipline as retrieval scoring and the numbers verifier,
+ * so "1 in" meets a `1"` row but never a 12 in row): a data row is kept when
+ * one of its measurements keys onto a question measurement. Table units
+ * usually live in the header ("Height Above Ground Line (ft)") rather than
+ * the row ("27.5 or Below"), so when nothing matches the whole table goes —
+ * tables top out around 5k chars, the model can take it, and a complete table
+ * always beats a sliced one.
+ *
+ * Legend lines come from the prompt set itself: retrieval already groups each
+ * table with its same-page short-text definitions (`withLegends`), so any
+ * sibling chunk on the same page carrying a `CODE = meaning` line contributes
+ * that line next to the table instead of chapters away from it. Non-table
+ * chunks keep the 650-char cut.
+ *
+ * Framing (`[index] page= section= evidence=`) and chunk order are untouched,
+ * so citation indices still address the same chunks, and the verifiers
+ * (`resolveQuote`, `verifyAnswerNumbers`, `verifyConditionalFidelity`) — which
+ * read the full chunk text, not the snippet — keep working unchanged.
+ */
+const isTableSeparatorRow = (line: string) =>
+  line.includes("---") && /^[\s|:\-]+$/.test(line);
+
+const isTableMetaRow = (line: string) => /EFFECTIVE DATE/i.test(line);
+
+/** First pipe-delimited cell, ignoring a leading `|`. */
+const firstTableCell = (line: string): string => {
+  const cells = line.split("|").map((cell) => cell.trim());
+  while (cells.length > 0 && cells[0] === "") {
+    cells.shift();
+  }
+  return cells[0] ?? "";
+};
+
+export const buildTableWindow = (
+  chunk: RetrievalChunk,
+  siblings: RetrievalChunk[],
+  questionKeys: Set<string>
+): string | null => {
+  const lines = chunk.text.split("\n");
+  const firstPipe = lines.findIndex((line) => line.includes("|"));
+  if (firstPipe < 0) {
+    return null;
+  }
+  const titleLines = lines
+    .slice(0, firstPipe)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const pipeRows = lines
+    .slice(firstPipe)
+    .filter(
+      (line) =>
+        line.includes("|") && !isTableSeparatorRow(line) && !isTableMetaRow(line)
+    );
+  if (pipeRows.length === 0) {
+    return null;
+  }
+  // Header rows: the leading run of rows whose first cell is a label, not a
+  // value ("Equipment Mounting Height ..." / "Usable ft-lb Grade A" / "SF"),
+  // capped at three. A table that opens on a value still keeps its first row
+  // as the header so the window is never headerless.
+  const headers: string[] = [];
+  const rest = [...pipeRows];
+  while (
+    rest.length > 0 &&
+    headers.length < 3 &&
+    !/^\d/.test(firstTableCell(rest[0] ?? ""))
+  ) {
+    headers.push((rest.shift() ?? "").trim());
+  }
+  if (headers.length === 0 && rest.length > 0) {
+    headers.push((rest.shift() ?? "").trim());
+  }
+  const matched =
+    questionKeys.size === 0
+      ? []
+      : rest.filter((line) =>
+          extractMeasurements(line).some((m) => questionKeys.has(measureKey(m)))
+        );
+  // Trailing footnotes ride with a matched window: they are short and often
+  // carry the unit or condition the rows assume.
+  let lastPipe = -1;
+  lines.forEach((line, index) => {
+    if (line.includes("|")) {
+      lastPipe = index;
+    }
+  });
+  const footnotes =
+    lastPipe < 0
+      ? []
+      : lines
+          .slice(lastPipe + 1)
+          .map((line) => line.trim())
+          .filter(Boolean);
+  // Legend lines from same-page short-text siblings in the prompt set (the
+  // definitions retrieval attached, e.g. "U = Unacceptable"). Whole sibling
+  // chunks stay as their own prompt entries; only the `CODE = meaning` lines
+  // are repeated next to the table, capped so the window stays bounded.
+  const legendLines: string[] = [];
+  for (const sibling of siblings) {
+    if (sibling.id === chunk.id) {
+      continue;
+    }
+    if (sibling.docId !== chunk.docId || sibling.page !== chunk.page) {
+      continue;
+    }
+    if (sibling.text.length > 400) {
+      continue;
+    }
+    for (const line of sibling.text.split("\n")) {
+      const trimmed = line.trim();
+      if (
+        trimmed.includes("=") &&
+        /[A-Za-z)]\s*=\s*\S/.test(trimmed) &&
+        !legendLines.includes(trimmed)
+      ) {
+        legendLines.push(trimmed);
+      }
+    }
+    if (legendLines.length >= 6) {
+      break;
+    }
+  }
+  const parts =
+    matched.length > 0
+      ? [...titleLines, ...headers, ...matched.map((line) => line.trim()), ...footnotes]
+      : [chunk.text.trim()];
+  if (legendLines.length > 0) {
+    parts.push(`Legend: ${legendLines.join(" ")}`);
+  }
+  return parts.filter(Boolean).join("\n");
+};
+
 const answerPrompt = (
   question: string,
   chunks: RetrievalChunk[],
   conversationPrefix = "",
   storedExceptions: StoredException[] = []
 ) => {
+  const questionKeys = new Set(extractMeasurements(question).map(measureKey));
   const context = chunks
     .map((chunk, index) => {
-      const snippet = sanitize(chunk.text).slice(0, PROMPT_SNIPPET_LEN);
+      const tableWindow = chunk.text.includes("|")
+        ? buildTableWindow(chunk, chunks, questionKeys)
+        : null;
+      const snippet =
+        tableWindow !== null
+          ? sanitize(tableWindow)
+          : sanitize(chunk.text).slice(0, PROMPT_SNIPPET_LEN);
       return `[${index}] page=${chunk.page} section=${chunk.section ?? ""} evidence=${snippet}`;
     })
     .join("\n");

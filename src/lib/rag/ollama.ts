@@ -24,10 +24,50 @@ type OllamaChatPayload = {
   temperature: number;
   stream: boolean;
   messages: Array<{ role: "system" | "user"; content: string }>;
-  format?: "json";
+  /** Was `format: "json"`; now a full JSON schema (Ollama structured outputs)
+   * matching the exact answer shape `answerPrompt` demands. The regex
+   * fallback in `extractJsonFromText` stays for malformed output. */
+  format?: "json" | Record<string, unknown>;
   options?: {
     num_predict: number;
+    num_ctx: number;
   };
+};
+
+/**
+ * Structured-output schema for the answer call. Mirrors the JSON structure
+ * `answerPrompt` demands (answer / directAnswer / citations / figures) so the
+ * constraint cannot silently reshape the contract the pipeline parses.
+ */
+const ANSWER_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    answer: { type: "string" },
+    directAnswer: { type: "string" },
+    citations: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          chunkIndex: { type: "integer" },
+          quote: { type: "string" },
+          reason: { type: "string" },
+          type: { type: "string" },
+        },
+        required: ["chunkIndex", "quote"],
+      },
+    },
+    figures: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          chunkIndex: { type: "integer" },
+        },
+      },
+    },
+  },
+  required: ["answer", "directAnswer", "citations", "figures"],
 };
 
 type OllamaResponseChunk = {
@@ -77,9 +117,16 @@ const chatInit = (
     model: config.OLLAMA_CHAT_MODEL,
     stream,
     temperature: config.OPENAI_TEMPERATURE,
-    format: "json",
+    format: ANSWER_SCHEMA,
     options: {
       num_predict: config.MAX_OUTPUT_TOKENS,
+      // num_ctx 8192, sized from the actual prompt instead of the Ollama
+      // default: up to 4 prompt chunks, each bounded by the largest table
+      // chunk observed (~5,000 chars, sent whole so tables never cut
+      // mid-row) = ~20,000 chars ~= ~5,000 tokens at ~4 chars/token, plus
+      // instructions / prior conversation (~1,500 tokens) plus 320 output
+      // tokens ~= ~6.8k tokens total — fits 8192 with headroom.
+      num_ctx: 8192,
     },
     messages: [
       { role: "system", content: "You are a retrieval-grounded ESR assistant." },

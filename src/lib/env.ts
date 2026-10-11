@@ -124,10 +124,6 @@ const schema = z.object({
     .string()
     .optional()
     .transform((value) => intFromEnv(value, 320)),
-  CACHE_STALE_SECONDS: z
-    .string()
-    .optional()
-    .transform((value) => intFromEnv(value, 3600)),
   /** When true, skip LLM and use extractive fallback only (faster, fully grounded). */
   EXTRACTIVE_ANSWER: z
     .string()
