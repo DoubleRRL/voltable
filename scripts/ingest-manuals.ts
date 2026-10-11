@@ -236,6 +236,21 @@ export const htmlTableToMarkdown = (html: string): string => {
         .replace(/&amp;/g, "&")
         .replace(/&lt;/g, "<")
         .replace(/&gt;/g, ">")
+        // Tables carry real inch/foot marks as entities (1&quot; x 7&#x27;).
+        // Leaving them encoded destroys the measurement tokens the question
+        // side expands ("1"" → "1 inches"), so a 1-inch anchor question can
+        // never meet its table. Decode everything, not just the common four.
+        .replace(/&quot;/g, '"')
+        .replace(/&#x22;/gi, '"')
+        .replace(/&#34;/g, '"')
+        .replace(/&#x27;/gi, "'")
+        .replace(/&#39;/g, "'")
+        .replace(/&#x([0-9a-f]+);/gi, (_, hex) =>
+          String.fromCharCode(parseInt(hex, 16)),
+        )
+        .replace(/&#(\d+);/g, (_, dec) =>
+          String.fromCharCode(parseInt(dec, 10)),
+        )
         .replace(/\s+/g, " ")
         .trim();
       cells.push(text);

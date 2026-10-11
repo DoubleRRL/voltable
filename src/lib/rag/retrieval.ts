@@ -4,6 +4,7 @@ import {
   ftsQueryTokens,
   getAssetsForChunkIds,
   getManualAffinity,
+  searchTablesByMeasure,
   getChunksByPairGroup,
   getShortTextChunksByPages,
   getStoredChunksByIds,
@@ -11,6 +12,7 @@ import {
 } from "@/lib/rag/storage";
 import { getAppConfig } from "@/lib/env";
 import { manualsNamedIn } from "@/lib/rag/docs";
+import { extractMeasurements, measureKey } from "./measure";
 
 export { getAssetsForChunkIds };
 
@@ -66,6 +68,8 @@ export type QueryIntent = {
   tokens: string[];
   /** Distinctive tokens, used for coverage scoring. */
   contentTokens: string[];
+  /** Normalized measurements in the question ("1in"), for table row-key matching. */
+  measures: string[];
 };
 
 export const analyzeQuery = (question: string, visualFirst = false): QueryIntent => {
@@ -74,17 +78,18 @@ export const analyzeQuery = (question: string, visualFirst = false): QueryIntent
   const tokens = tokenize(question);
   const approvalIntent = APPROVAL_PATTERN.test(question);
 
+  const measures = extractMeasurements(question).map(measureKey);
   const figureWord = FIGURE_WORDS.find((w) => lowered.includes(w));
   if (figureWord) {
-    return { visualIntent: true, approvalIntent, trigger: "figure-word", tokens, contentTokens };
+    return { visualIntent: true, approvalIntent, trigger: "figure-word", tokens, contentTokens, measures };
   }
   if (UNIT_TAIL.test(lowered)) {
-    return { visualIntent: true, approvalIntent, trigger: "measurement", tokens, contentTokens };
+    return { visualIntent: true, approvalIntent, trigger: "measurement", tokens, contentTokens, measures };
   }
   if (visualFirst) {
-    return { visualIntent: true, approvalIntent, trigger: "visual-first", tokens, contentTokens };
+    return { visualIntent: true, approvalIntent, trigger: "visual-first", tokens, contentTokens, measures };
   }
-  return { visualIntent: false, approvalIntent, trigger: "none", tokens, contentTokens };
+  return { visualIntent: false, approvalIntent, trigger: "none", tokens, contentTokens, measures };
 };
 
 /**
@@ -114,6 +119,14 @@ const UNIT_ALIASES: Record<string, string[]> = {
   pool: ["pools", "swimming"],
   pools: ["pool", "swimming"],
   swimming: ["pool", "pools"],
+  // Plurals the corpus never uses: planners ask "guys" and "multiplex",
+  // the manuals write "guy" and "duplex/triplex/quadruplex".
+  guys: ["guy"],
+  guy: ["guys"],
+  multiplex: ["duplex", "triplex", "quadruplex"],
+  duplex: ["multiplex"],
+  triplex: ["multiplex"],
+  quadruplex: ["multiplex"],
   // Crew shorthand, per planner vocabulary: oh/ug/pri/sec/svc/str/pad.
   // Short-to-long covers typed shorthand ("pri" against "primary"); the
   // reverse covers OCR and figure callouts that abbreviate ("Pri.", "Svc.").
@@ -224,6 +237,18 @@ const PRIOR_FIGURE = 0.08;
 const PRIOR_NARRATIVE = 0.03;
 /** Boost for a normative rule with a number, on approval questions only. */
 const PRIOR_RULE = 0.08;
+/**
+ * Boost for a table sharing an exact measurement with the question.
+ *
+ * Lookup questions name the row key ("how many guys on a 1-inch anchor" wants
+ * the `1"` row of Table 11), and dense worked-example prose otherwise buries
+ * the table: short example chunks outrank a 200-cell table on BM25 density
+ * every time. An exact measurement match is stronger than the type priors
+ * because it is specific to this question, not this kind of question — and it
+ * uses the same no-conversion key discipline as the answer verifier, so "1 in"
+ * meets `1"` but never meets a 12 in row.
+ */
+const PRIOR_MEASURE_MATCH = 0.10;
 
 /**
  * No manual affinity known — used where a chunk is placed by its relationship
@@ -320,6 +345,12 @@ const scoreChunk = (
   if (intent.approvalIntent && RULE_PATTERN.test(chunk.text) && RULE_MEASURE_PATTERN.test(chunk.text)) {
     score += PRIOR_RULE;
   }
+  if (chunk.evidenceType === "table" && intent.measures.length > 0) {
+    const chunkKeys = new Set(extractMeasurements(chunk.text).map(measureKey));
+    if (intent.measures.some((m) => chunkKeys.has(m))) {
+      score += PRIOR_MEASURE_MATCH;
+    }
+  }
   score += sectionMatchScore(chunk.section, intent.contentTokens);
 
   // Manual prior, applied last so it discounts a whole manual rather than one
@@ -377,6 +408,21 @@ export const retrieveChunks = async (
   };
 
   const ftsHits = searchChunksFts(question, FTS_CANDIDATES);
+  // Tables carrying the question's measurements join candidates on their own
+  // merit: prose-length competition buries lookup tables past any rank a
+  // re-scorer can reach (Table 10-45 sat at 586). Deduped below; the scorer —
+  // coverage, measure prior, manual prior — still decides between them.
+  const tableHits =
+    intent.measures.length > 0
+      ? searchTablesByMeasure(intent.measures, 40, intent.contentTokens)
+      : [];
+  const seenHitIds = new Set(ftsHits.map((h) => h.chunkId));
+  for (const hit of tableHits) {
+    if (!seenHitIds.has(hit.chunkId)) {
+      seenHitIds.add(hit.chunkId);
+      ftsHits.push(hit);
+    }
+  }
   if (ftsHits.length === 0) {
     return empty;
   }

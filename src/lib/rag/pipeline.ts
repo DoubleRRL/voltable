@@ -17,6 +17,11 @@ import type {
   StoredException,
 } from "@/lib/rag/types";
 import { retrieveChunks } from "@/lib/rag/retrieval";
+import {
+  extractMeasurements,
+  measureKey,
+  type VerifiedMeasurement,
+} from "./measure";
 import { MANUALS, evidencePageLink } from "@/lib/rag/docs";
 import type { ManualId } from "@/lib/rag/docs";
 import {
@@ -838,52 +843,8 @@ type TableVerdict = {
 
 /** Units the answer verifier understands, normalized so "2.5 feet" meets
  *  "2.5 ft" but never meets "30 in" — cross-unit conversion would bless a
- *  riser dimension as a panel setback. */
-type VerifiedMeasurement = { value: number; unit: string };
-
-const normalizeMeasureUnit = (raw: string): string | null => {
-  const u = raw.toLowerCase().replace(/\.$/, "");
-  if (["in", "inch", "inches", '"', "″"].includes(u)) return "inches";
-  if (["ft", "feet", "foot", "'", "′"].includes(u)) return "feet";
-  if (["v", "volt", "volts"].includes(u)) return "volts";
-  if (["a", "amp", "amps", "ampere", "amperes"].includes(u)) return "amps";
-  if (["%", "percent", "pct"].includes(u)) return "percent";
-  return null;
-};
-
-const parseMeasureValue = (raw: string): number | null => {
-  const s = raw.replace(/\s+/g, "");
-  if (s.includes("/")) {
-    const [a, b] = s.split("/");
-    const n = Number(a) / Number(b);
-    return Number.isFinite(n) ? n : null;
-  }
-  const n = Number(s);
-  return Number.isFinite(n) ? n : null;
-};
-
-const WORD_NUMBERS: Record<string, number> = {
-  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8,
-  nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14,
-  fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19,
-  twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70,
-  eighty: 80, ninety: 90,
-};
-
-const extractMeasurements = (text: string): VerifiedMeasurement[] => {
-  const re =
-    /(\d+\s*\/\s*\d+|\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)\s*(inches|inch|feet|foot|volts|volt|amps|ampere|amperes|amp|percent|pct|%|in\b|ft\b|["'′″])/gi;
-  const out: VerifiedMeasurement[] = [];
-  for (const m of text.matchAll(re)) {
-    const unit = normalizeMeasureUnit(m[2] ?? "");
-    const rawNum = (m[1] ?? "").replace(/\s+/g, "");
-    const value = /^\d/.test(rawNum) ? parseMeasureValue(rawNum) : WORD_NUMBERS[rawNum.toLowerCase()] ?? null;
-    if (unit !== null && value !== null) out.push({ value, unit });
-  }
-  return out;
-};
-
-const measureKey = (m: VerifiedMeasurement): string => `${m.value} ${m.unit}`;
+ *  riser dimension as a panel setback. Shared with retrieval scoring via
+ *  ./measure (pipeline already imports retrieval — the reverse would cycle). */
 
 /**
  * A requirement stated under a condition must be answered under that
@@ -904,7 +865,13 @@ const measureKey = (m: VerifiedMeasurement): string => `${m.value} ${m.unit}`;
  * partial either way.
  */
 const CONDITION_MARKERS = [
-  "joint",
+  // "joint" only as shared-use language ("joint use", "joint pole"), never
+  // bare: a "Joint Sidewalk Anchor" is a shared anchor, not a condition, and
+  // the bare word fired a bogus caveat on exactly that.
+  "joint use",
+  "joint pole",
+  "jointly",
+  "joint attachment",
   "unless",
   "except",
   "heavy loading",

@@ -736,7 +736,19 @@ export const getManualAffinity = (
         ORDER BY hits DESC`,
     )
     .all(query.join(" OR ")) as { docId: string; hits: number }[];
-  return rows;
+  // Normalize by manual size: raw hit counts measure corpus mass, not
+  // topical aboutness, and DOH (8,446 chunks) wins every shared-vocabulary
+  // question by volume. Density (hits per chunk) asks which manual is
+  // *about* the question instead. Measured: "how many guys on a 1-inch
+  // anchor" went DOH 1213 / PLM 484 raw (PLM discounted out) versus
+  // DOH 0.144 / PLM 0.210 density (PLM in play, DOH still competitive).
+  const totals = db
+    .prepare("SELECT doc_id AS docId, COUNT(*) AS n FROM chunks GROUP BY doc_id")
+    .all() as { docId: string; n: number }[];
+  const size = new Map(totals.map((t) => [t.docId, Math.max(t.n, 1)]));
+  return rows
+    .map((r) => ({ ...r, hits: r.hits / (size.get(r.docId) ?? 1) }))
+    .sort((a, b) => b.hits - a.hits);
 };
 
 /** ESR substring / multi-token AND search for autocomplete (local SQLite). */
@@ -1074,6 +1086,13 @@ const SHORTHAND: Array<[RegExp, string]> = [
   [/\bu\.g\./gi, "underground"],
   [/\boh\b/gi, "overhead"],
   [/\bug\b/gi, "underground"],
+  // Pole class shorthand: planners write cl-4, cl 3; the manuals write
+  // "Class 4", "Class 3". Bare "cl" is left alone — in drawings it can mean
+  // centerline — but cl-plus-a-digit is always a class.
+  [/\bcl[-\s]?([1-9])\b/gi, "class $1"],
+  // Species shorthand: dftb is Douglas Fir through-bored, written DF-TB
+  // (tokenized to df + tb) or spelled out in the manuals.
+  [/\bdftb\b/gi, "douglas fir through bored df tb"],
   [/(\d+(?:\.\d+)?)\s*['′]/g, "$1 feet"],
   [/(\d+(?:\.\d+)?)\s*["″]/g, "$1 inches"],
 ];
@@ -1150,11 +1169,61 @@ export const searchChunksFts = (raw: string, limit: number): FtsHit[] => {
 };
 
 /**
+ * Table chunks containing any of the given measurement keys ("1 inches").
+ *
+ * Lookup questions name the row key, but giant tables BM25-rank in the
+ * hundreds against prose-length competition — Table 10-45 sat at rank 586 for
+ * a question it answers, so no re-ranking boost could ever reach it. This is
+ * the second candidate stream that fixes the generation side: tables matching
+ * the question's measurements enter candidates on their own merit, where the
+ * measure-match prior then scores them. Restricted to tables and capped,
+ * because "1 inches" alone matches dozens of dimension tables and the scorer —
+ * not the fetcher — decides between them.
+ */
+export const searchTablesByMeasure = (
+  measureKeys: string[],
+  limit = 40,
+  topicalTerms: string[] = [],
+): FtsHit[] => {
+  const measures = [...new Set(measureKeys.flatMap((k) => k.split(" ")))].filter(
+    (t) => t.length > 0,
+  );
+  if (measures.length === 0) {
+    return [];
+  }
+  // The measurement alone matches hundreds of dimension tables ("1 inch" is
+  // everywhere hardware is sized), so the topical nouns come along: a lookup
+  // table for THIS question carries both the measurement and the topic. Either
+  // side alone is a flood; together they are a filter.
+  const topical = [...new Set(topicalTerms)].filter((t) => t.length >= 3).slice(0, 8);
+  const measureClause = `(${measures.map((t) => `"${t}"`).join(" OR ")})`;
+  const match =
+    topical.length > 0
+      ? `${measureClause} AND (${topical.map((t) => `"${t}"`).join(" OR ")})`
+      : measureClause;
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT f.chunk_id, bm25(chunks_fts) AS b
+         FROM chunks_fts f
+         JOIN chunks c ON c.id = f.chunk_id
+        WHERE chunks_fts MATCH ?
+          AND c.chunk_type = 'table'
+        ORDER BY b ASC
+        LIMIT ?`,
+    )
+    .all(match, limit) as {
+    chunk_id: string;
+    b: number;
+  }[];
+  return rows.map((r) => ({ chunkId: String(r.chunk_id), bm25: Number(r.b) }));
+};
+
+/**
  * BM25 of a single chunk against a query, or null if it does not match.
  * Used to re-score specific candidates without another full sweep.
  */
-export const bm25ForChunk = (chunkId: string, raw: string): number | null => {
-  const match = buildFtsMatchQuery(raw);
+export const bm25ForChunk = (chunkId: string, raw: string): number | null => {  const match = buildFtsMatchQuery(raw);
   if (!match) {
     return null;
   }

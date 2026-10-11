@@ -181,6 +181,14 @@ export function AnswerCard({
   const chapters = message.retrievalSummary?.chapters ?? [];
   const hasSources = message.citations.length > 0;
 
+  // While the answer is still arriving, show only the orb — no card, no
+  // partial words. Half-sentences on screen read as findings before there is
+  // one, and the full card lands when the stream settles. Errors still show:
+  // a failed stream must say so, not spin forever.
+  if (message.streaming && !message.error) {
+    return <ThinkingIndicator className="px-0 py-0" />;
+  }
+
   return (
     <Card
       className={cn("gap-3 p-3", surfaceClasses(1, 2), shape.container)}
