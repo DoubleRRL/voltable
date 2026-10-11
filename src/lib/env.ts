@@ -55,7 +55,6 @@ const schema = z.object({
     .default("development")
     .transform((value) => value.toLowerCase()),
   OPENAI_API_KEY: z.string().optional(),
-  OPENAI_EMBEDDING_MODEL: z.string().default("text-embedding-3-small"),
   OLLAMA_BASE_URL: z.string().default("http://127.0.0.1:11434"),
   OLLAMA_CHAT_MODEL: z.string().default("qwen2.5:latest"),
   OPENAI_TEMPERATURE: z
@@ -109,10 +108,6 @@ const schema = z.object({
    * resolves against whatever evidence was generated for that page.
    */
   EVIDENCE_DIR: z.string().default("./public/evidence"),
-  EMBEDDING_FALLBACK_DIM: z
-    .string()
-    .optional()
-    .transform((value) => intFromEnv(value, 1536)),
   RETRIEVAL_TOP_K: z
     .string()
     .optional()

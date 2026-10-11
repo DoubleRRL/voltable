@@ -49,14 +49,22 @@ DATE_RE = re.compile(r"\b(\d{1,2}[-/]\d{1,2}[-/]\d{4})\b")
 # The printed page label, e.g. "10-8", "3-24", "2 - 12". Deliberately *not*
 # anchored on the literal "PAGE": the two sit on different baselines and come
 # out of extract_text() in arbitrary order, so adjacency is not available.
-PAGE_LABEL_RE = re.compile(r"\b(\d{1,4}\s*[-–—]\s*\d{1,4})\b")
-CHAPTER_RE = re.compile(r"\b(ESR|ADS|PLM)[-–—]\s*(\d+)\b")
+# Trailing boundary is a negative lookahead for more digits, not \b: footer
+# fragments glue labels to values ("1 of 7Effective Date:"), and \b between a
+# digit and a letter fails where a planner reading the page has no trouble.
+PAGE_LABEL_RE = re.compile(r"\b(\d{1,4}\s*[-–—]\s*\d{1,4})(?!\d)")
+CHAPTER_RE = re.compile(r"\b(ESR|ADS|PLM)[-–—]\s*(\d+)(?!\d)")
 # Standard numbers look like "AC 120", "CD 132", "SS564", "MC830" — and some
 # carry a trailing letter: "FC 623P", "FC 700P" in UGS. A hard word boundary
 # after the digits matched nothing there, so those pages lost their standard
 # entirely and could not be cited.
-STANDARD_RE = re.compile(r"\b([A-Z]{2,3}\s?\d{2,4}[A-Z]?)\b")
-SHEET_RE = re.compile(r"\b(\d{1,4})\s*of\s*(\d{1,4})\b", re.IGNORECASE)
+STANDARD_RE = re.compile(r"\b([A-Z]{2,3}\s?\d{2,4}[A-Z]?)(?![0-9A-Z])")
+# Sheet counts glue themselves to everything around them: "Sheet 1 of 7",
+# "2of2", "14 of102", "Sheet13of16". The Sheet-anchored form is tried first so
+# a stray "1 of 2" elsewhere in a footer cannot win over the real count; the
+# bare form is the fallback for footers whose Sheet token sits on another line.
+SHEET_RE = re.compile(r"Sheet\s*(\d{1,4})\s*of\s*(\d{1,4})(?!\d)", re.IGNORECASE)
+SHEET_BARE_RE = re.compile(r"\b(\d{1,4})\s*of\s*(\d{1,4})(?!\d)", re.IGNORECASE)
 
 
 def band_fragments(page, low: float, high: float) -> list[tuple[float, float, str]]:
@@ -136,7 +144,7 @@ def parse(rules: dict, fragments) -> dict:
         standard = STANDARD_RE.search(footer)
         if standard:
             out["standard"] = re.sub(r"\s+", " ", standard.group(1).strip())
-        sheet = SHEET_RE.search(footer)
+        sheet = SHEET_RE.search(footer) or SHEET_BARE_RE.search(footer)
         if sheet:
             out["sheetOf"] = int(sheet.group(1))
             out["sheetCount"] = int(sheet.group(2))

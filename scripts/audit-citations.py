@@ -115,6 +115,53 @@ def main() -> int:
 
     total = db.execute("SELECT COUNT(*) c FROM visual_assets").fetchone()["c"]
     print(f"\nchecked {total} catalogued assets across {len(manuals)} manuals")
+
+    # Files on disk that no row references are dead weight the bundle ships
+    # anyway, because the packager copies the whole tree. A re-ingest writes
+    # fresh crops while stale derivatives from the previous run stay behind —
+    # UGS once carried 1,970 of these — so orphans are checked, not assumed.
+    referenced: set[str] = set()
+    for table, column in (("visual_assets", "figure_url"), ("visual_assets", "thumbnail_url")):
+        for (url,) in db.execute(f"SELECT {column} FROM {table} WHERE {column} IS NOT NULL"):
+            referenced.add(url.rsplit("/", 1)[-1])
+    orphans: list[str] = []
+    for manual in manuals:
+        doc_dir = evidence / manual
+        if not doc_dir.is_dir():
+            continue
+        for path in sorted(doc_dir.iterdir()):
+            if not path.is_file() or path.suffix not in (".png", ".webp", ".pdf"):
+                continue
+            if path.name not in referenced and not path.name.startswith("page-"):
+                # page-N.* renders are the fallback preview images, referenced
+                # by construction rather than by row
+                orphans.append(f"{manual}/{path.name}")
+            elif path.name.startswith("page-"):
+                stem = path.stem
+                try:
+                    int(stem.split("-", 1)[1])
+                except (ValueError, IndexError):
+                    orphans.append(f"{manual}/{path.name}")
+    # Fallback previews are built at query time, not stored, so their URLs live
+    # in code rather than rows. The one class of URL the row check cannot see is
+    # the page-preview fallback, which once pointed at .png files the optimizer
+    # had deleted. Assert the shape matches what ships.
+    fallback_ok = True
+    for manual in manuals:
+        doc_dir = evidence / manual
+        previews = sorted(doc_dir.glob("page-*.webp")) if doc_dir.is_dir() else []
+        if not previews:
+            # No page renders shipped for this manual at all; any fallback that
+            # fires would 404.
+            problems.append(f"{manual}: no page-*.webp renders; fallback previews would 404")
+            fallback_ok = False
+    if orphans:
+        print(f"\n{len(orphans)} orphan file(s) on disk with no index row:", file=sys.stderr)
+        for line in orphans[:20]:
+            print(f"  {line}", file=sys.stderr)
+        if len(orphans) > 20:
+            print(f"  ... and {len(orphans) - 20} more", file=sys.stderr)
+        problems.append(f"{len(orphans)} orphan evidence files (run evidence.py build to clean)")
     if problems:
         print(f"\n{len(problems)} problem(s):", file=sys.stderr)
         for line in problems[:40]:

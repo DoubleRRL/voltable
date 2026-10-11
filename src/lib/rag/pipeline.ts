@@ -665,7 +665,10 @@ const ensurePagePreviewFigures = (
       caption: `${MANUALS[location.docId].code} page ${location.page}`,
       sourceLink: evidencePageLink(location.docId, location.page),
       chapter: null,
-      figureUrl: `/evidence/${location.docId}/page-${location.page}.png`,
+      // Must match what evidence.py ships. It used to say .png here; the
+      // optimizer converts every shipped image to lossless .webp and deletes
+      // the PNG, so this pointed at a file that does not exist.
+      figureUrl: `/evidence/${location.docId}/page-${location.page}.webp`,
       ocrText: null,
     });
   }

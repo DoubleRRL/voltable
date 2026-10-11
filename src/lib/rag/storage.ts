@@ -334,6 +334,11 @@ export const getDb = () => {
   return db;
 };
 
+/**
+ * Full FTS rebuild. Only for first build and repair — ingest keeps the index
+ * in step per document instead, because a whole-corpus delete plus re-insert
+ * on every manual is 20,000 wasted rows and growing.
+ */
 export const rebuildChunkFtsIndex = () => {
   const db = getDb();
   ensureFts(db);
@@ -344,21 +349,6 @@ export const rebuildChunkFtsIndex = () => {
   `);
 };
 
-export const clearIndex = () => {
-  const db = getDb();
-  db.prepare("DELETE FROM chunks").run();
-  db.prepare("DELETE FROM query_cache").run();
-  try {
-    db.prepare("DELETE FROM visual_assets").run();
-  } catch {
-    /* table may not exist on very old DBs until migrate */
-  }
-  try {
-    db.exec("DELETE FROM chunks_fts");
-  } catch {
-    /* FTS may not exist on very old DBs until next open */
-  }
-};
 
 export const upsertChunks = (chunks: StoredChunk[]) => {
   const db = getDb();
@@ -405,7 +395,24 @@ export const upsertChunks = (chunks: StoredChunk[]) => {
   });
 
   tx(chunks);
-  rebuildChunkFtsIndex();
+
+  // Keep the FTS index in step with exactly the rows just written. Rebuilding
+  // the whole corpus here cost a full 20,000-row delete plus re-insert on
+  // every manual ingest; the per-doc delete lives in clearManual, so this is
+  // the matching per-doc insert.
+  const db2 = getDb();
+  const ftsInsert = db2.prepare(
+    "INSERT INTO chunks_fts(chunk_id, text) VALUES (?, ?)"
+  );
+  const ftsTx = db2.transaction((records: StoredChunk[]) => {
+    db2.prepare("DELETE FROM chunks_fts WHERE chunk_id IN (SELECT id FROM chunks WHERE doc_id = ?)").run(records[0]?.docId ?? "");
+    for (const chunk of records) {
+      ftsInsert.run(chunk.id, chunk.text);
+    }
+  });
+  if (chunks.length > 0) {
+    ftsTx(chunks);
+  }
 };
 
 export const upsertVisualAssets = (assets: VisualAsset[]) => {
@@ -712,8 +719,7 @@ export type SuggestHit = {
  * in sync.
  */
 export const getManualAffinity = (
-  question: string,
-  limit = 400
+  question: string
 ): { docId: string; hits: number }[] => {
   const db = getDb();
   const query = ftsQueryTokens(question);
@@ -730,7 +736,7 @@ export const getManualAffinity = (
         ORDER BY hits DESC`,
     )
     .all(query.join(" OR ")) as { docId: string; hits: number }[];
-  return rows.slice(0, limit).length ? rows : [];
+  return rows;
 };
 
 /** ESR substring / multi-token AND search for autocomplete (local SQLite). */
@@ -889,8 +895,21 @@ const figureCaption = (asset: VisualAsset): string => {
  * page, and a question about a clearance is answered by the drawing, not by the
  * grid of notes printed under it; `id` breaks the tie so the order is stable.
  */
-export const getAllPageFigures = (): FigureEvidence[] =>
-  getVisualAssets()
+/**
+ * Every catalogued figure, cached for the life of the process.
+ *
+ * Called up to twice per query (once for the candidate set, once inside the
+ * page lookup), each call a full scan and sort of 5,000+ assets. Assets never
+ * change at runtime — ingest is a separate process that replaces the database
+ * file — so there is nothing to invalidate against.
+ */
+let cachedPageFigures: FigureEvidence[] | null = null;
+
+export const getAllPageFigures = (): FigureEvidence[] => {
+  if (cachedPageFigures) {
+    return cachedPageFigures;
+  }
+  cachedPageFigures = getVisualAssets()
     .filter((asset) => !isPageHeaderBanner(asset.bbox))
     .map((asset) => ({
       asset,
@@ -907,10 +926,11 @@ export const getAllPageFigures = (): FigureEvidence[] =>
         chapter: asset.chapter,
         // The crop is the point of the app; the full page render stays as the
         // fallback for a catalogued asset whose crop was never written.
+        // Shipped as .webp — see the fallback-preview note in pipeline.ts.
         figureUrl:
           asset.figureUrl ??
           asset.thumbnailUrl ??
-          `/evidence/${asset.docId}/page-${asset.page}.png`,
+          `/evidence/${asset.docId}/page-${asset.page}.webp`,
         ocrText: asset.textLayers.ocr?.trim() || null,
       } satisfies FigureEvidence,
     }))
@@ -922,6 +942,8 @@ export const getAllPageFigures = (): FigureEvidence[] =>
         a.figure.id.localeCompare(b.figure.id)
     )
     .map((entry) => entry.figure);
+  return cachedPageFigures;
+};
 
 /**
  * Figures on specific pages of specific manuals.

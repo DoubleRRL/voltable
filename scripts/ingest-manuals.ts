@@ -7,7 +7,6 @@ import pLimit from "p-limit";
 import { getAppConfig } from "@/lib/env";
 import {
   clearManual,
-  rebuildChunkFtsIndex,
   upsertChunks,
   upsertVisualAssets,
 } from "@/lib/rag/storage";
@@ -490,7 +489,11 @@ const ingestManual = async (id: ManualId, opts: { force: boolean; limit: number 
     const pageFacts = facts.get(pageNo);
     // A sheet-numbered manual's citation identity is the standard, so it
     // drives chapter tracking directly; a page-numbered one uses the chapter.
-    let chapterKey = pageFacts?.chapter ?? null;
+    // The chapter column also carries the standard, because every consumer of
+    // `chapter` — the retrieval prior, the eval's chapter check, the badge —
+    // reads that column and a NULL there would leave DOH and UGS with no
+    // chapter prior at all.
+    let chapterKey = pageFacts?.chapter ?? pageFacts?.standard ?? null;
     let standard = pageFacts?.standard ?? null;
     const blocks = [...page.blocks].sort((a, b) => a.index - b.index);
 
@@ -831,7 +834,8 @@ const main = async () => {
     totals.chunks += result.chunks;
     totals.assets += result.assets;
   }
-  rebuildChunkFtsIndex();
+  // No final FTS rebuild: upsertChunks keeps the index in step per document.
+  // rebuildChunkFtsIndex() remains for first-build repair only.
   console.log(
     `[ingest] done: ${ids.map((i) => MANUALS[i].code).join(" + ")} · ` +
       `${totals.chunks} chunks · ${totals.assets} assets · ${((Date.now() - started) / 1000).toFixed(1)}s`
