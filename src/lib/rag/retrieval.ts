@@ -12,7 +12,7 @@ import {
   searchChunksFts,
 } from "@/lib/rag/storage";
 import { getAppConfig } from "@/lib/env";
-import { manualsNamedIn } from "@/lib/rag/docs";
+import { manualsNamedIn, type ManualId } from "@/lib/rag/docs";
 import { UNIT_ALIASES } from "@/lib/rag/lexicon-data";
 import { extractMeasurements, measureKey } from "./measure";
 
@@ -122,7 +122,27 @@ const oneEditVariants = (token: string): string[] => {
 /** Minimum token length the corrector attempts. Shorter tokens are looked up, never rewritten. */
 const MIN_CORRECT_LENGTH = 3;
 
+/**
+ * Correction memo. Variant generation builds ~54·L strings per token, so an
+ * uncorrected token costs a few thousand Map lookups every time it appears;
+ * across a 78-row eval the same OOV words recur constantly. Capped so a long
+ * run cannot grow it without bound — correctness is unaffected (the mapping
+ * is pure), only repeat-lookup speed.
+ */
+const correctionMemo = new Map<string, string>();
+const CORRECTION_MEMO_MAX = 20000;
+
 export const correctToken = (token: string): string => {
+  const memoized = correctionMemo.get(token);
+  if (memoized !== undefined) return memoized;
+  const result = computeCorrectToken(token);
+  if (correctionMemo.size < CORRECTION_MEMO_MAX) {
+    correctionMemo.set(token, result);
+  }
+  return result;
+};
+
+const computeCorrectToken = (token: string): string => {
   if (token.length < MIN_CORRECT_LENGTH) return token;
   if (/\d/.test(token)) return token;
   const { byTerm } = getLexiconIndex();
@@ -406,6 +426,15 @@ const scoreChunk = (
 
 export type RetrieveOptions = {
   visualFirst?: boolean;
+  /**
+   * Demote one manual out of play for this call only: its prior is set to 0,
+   * the same soft discount `manualsNamedIn` gives a manual the question does
+   * not name. Never a filter — a chunk that earns its place on score still
+   * surfaces. The Phase 4 answer retry drops the manual of the first answer's
+   * top-1 chunk, on the hypothesis that the first answer came from the wrong
+   * corpus.
+   */
+  dropManual?: ManualId;
 };
 
 const FTS_CANDIDATES = 240;
@@ -429,7 +458,7 @@ export const retrieveChunks = async (
     intent: QueryIntent;
   };
 }> => {
-  const { visualFirst = false } = options;
+  const { visualFirst = false, dropManual } = options;
   const config = getAppConfig();
   const intent = analyzeQuery(question, visualFirst);
   // The corrected lexical view of the question: typo'd tokens match nothing
@@ -494,6 +523,11 @@ export const retrieveChunks = async (
     for (const id of manualPrior.keys()) {
       manualPrior.set(id, named.includes(id as never) ? 1 : 0);
     }
+  }
+  // The retry's suspect manual goes out of play whatever affinity and naming
+  // say — applied after the named-manual block so the drop wins over both.
+  if (dropManual) {
+    manualPrior.set(dropManual, 0);
   }
 
   const bm25ById = new Map(ftsHits.map((h) => [h.chunkId, h.bm25]));

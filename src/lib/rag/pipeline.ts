@@ -12,11 +12,12 @@ import {
 import type {
   ChatAnswer,
   FigureEvidence,
+  RetrievalResult,
   SourceCitation,
   StoredChunk,
   StoredException,
 } from "@/lib/rag/types";
-import { retrieveChunks } from "@/lib/rag/retrieval";
+import { NOT_COVERED_THRESHOLD, retrieveChunks } from "@/lib/rag/retrieval";
 import {
   extractMeasurements,
   measureKey,
@@ -48,6 +49,56 @@ import {
  * three surfaces turns one finding into three warnings.
  */
 const NOT_COVERED_ANSWER = "Check with your supervisor before answering this one.";
+
+/**
+ * Gray band for the Phase 4 verifier-triggered retry.
+ *
+ * Measured retrieval-only on data/eval/real.jsonl (scripts/eval-real.ts):
+ * top-1 coverage <0.30: 1, 0.30–0.45: 3, 0.45–0.60: 2, >0.60: 8. The 0.30–0.45
+ * band is the gray zone the retry targets — too thin to answer from, too thick
+ * to refuse. The upper edge defaults to NOT_COVERED_THRESHOLD so the band
+ * always ends exactly where the not-covered gate begins; the lower edge is
+ * where a top-1 chunk stops being worth a prompt on its own.
+ *
+ * Env overrides: ESR_RETRY_GRAY_MIN / ESR_RETRY_GRAY_MAX. An unparseable value
+ * falls back to the default; an empty band (min >= max) simply never fires on
+ * coverage. The band is a trigger input only — it changes no gate.
+ */
+const floatOr = (value: string | undefined, fallback: number): number => {
+  const parsed = Number.parseFloat(value ?? "");
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+const RETRY_GRAY_MIN = floatOr(process.env.ESR_RETRY_GRAY_MIN, 0.3);
+const RETRY_GRAY_MAX = floatOr(process.env.ESR_RETRY_GRAY_MAX, NOT_COVERED_THRESHOLD);
+
+/** The two verifier verdicts, as the retry log records them. */
+export type RetryVerdict = { numbersOk: boolean; fidelityOk: boolean };
+
+/** What a verifier returns: possibly-rewritten prose plus its pass/fail. */
+type VerifierResult = { answer: string; directAnswer: string; ok: boolean };
+export type RetryOutcome = "rescued" | "refused" | "error";
+
+/**
+ * One fired retry, for a future eval to score. Module-level ring buffer (last
+ * 50), read via `getRetryLog()`; the UI never sees it.
+ */
+export type RetryEvent = {
+  at: string;
+  question: string;
+  triggers: Array<"numbers" | "fidelity" | "grayBand">;
+  droppedManual: ManualId | null;
+  coverageBefore: number;
+  coverageAfter: number;
+  verdictBefore: RetryVerdict;
+  /** null when the second attempt produced no verdict (coverage refusal or a throw). */
+  verdictAfter: RetryVerdict | null;
+  outcome: RetryOutcome;
+};
+
+const RETRY_LOG_LIMIT = 50;
+const retryLog: RetryEvent[] = [];
+
+export const getRetryLog = (): readonly RetryEvent[] => retryLog;
 
 /** Closest chunks for a question that returned nothing above threshold. */
 const getNearestChunks = (question: string, limit: number): StoredChunk[] =>
@@ -103,6 +154,21 @@ type ParsedModelResponse = {
   citations?: Array<{ chunkIndex?: number; quote?: string; reason?: string; type?: string }>;
   figures?: Array<{ chunkIndex?: number }>;
 };
+
+/** Retrieval candidates as the prompt, citation and verifier layers read them. */
+const toRetrievalChunk = (result: RetrievalResult): RetrievalChunk => ({
+  docId: result.chunk.docId,
+  page: result.chunk.page,
+  text: result.chunk.text,
+  section: result.chunk.section ?? null,
+  chapter: result.chunk.chapter ?? null,
+  pageLabel: result.chunk.pageLabel ?? null,
+  standard: result.chunk.standard ?? null,
+  sheetOf: result.chunk.sheetOf ?? null,
+  sheetCount: result.chunk.sheetCount ?? null,
+  score: result.confidence,
+  id: result.chunk.id,
+});
 
 const MAX_PROMPT_CHUNKS = 4;
 const PROMPT_SNIPPET_LEN = 650;
@@ -1177,7 +1243,8 @@ const answerPrompt = (
   question: string,
   chunks: RetrievalChunk[],
   conversationPrefix = "",
-  storedExceptions: StoredException[] = []
+  storedExceptions: StoredException[] = [],
+  options: { fullTextChunkId?: string } = {}
 ) => {
   const questionKeys = new Set(extractMeasurements(question).map(measureKey));
   const context = chunks
@@ -1185,10 +1252,16 @@ const answerPrompt = (
       const tableWindow = chunk.text.includes("|")
         ? buildTableWindow(chunk, chunks, questionKeys)
         : null;
+      // The retry's strongest remaining candidate is sent whole: a 650-char
+      // slice of a long page is what the first answer failed on, and a table
+      // chunk sent whole is the full table (the window's no-match fallback),
+      // never a mid-row cut.
       const snippet =
-        tableWindow !== null
-          ? sanitize(tableWindow)
-          : sanitize(chunk.text).slice(0, PROMPT_SNIPPET_LEN);
+        chunk.id === options.fullTextChunkId
+          ? sanitize(chunk.text)
+          : tableWindow !== null
+            ? sanitize(tableWindow)
+            : sanitize(chunk.text).slice(0, PROMPT_SNIPPET_LEN);
       return `[${index}] page=${chunk.page} section=${chunk.section ?? ""} evidence=${snippet}`;
     })
     .join("\n");
@@ -1445,6 +1518,89 @@ const retrievalSummaryFor = (
   latencyMs: retrievalLatencyMs,
 });
 
+/**
+ * Assemble a model response into the shape the answer path serves: verified
+ * citations, exceptions, figures, and the two verifier verdicts.
+ *
+ * Shared by the first attempt and the Phase 4 retry so the second attempt is
+ * judged by exactly the same rules as the first — same citation building,
+ * same direct-answer derivation, same verifiers, same figure finalization.
+ */
+const assembleModelAnswer = (
+  parsed: ParsedModelResponse,
+  chunks: RetrievalChunk[],
+  question: string,
+  conversationPrefix: string,
+  allFigures: FigureEvidence[],
+  visualFirst: boolean
+): {
+  citations: SourceCitation[];
+  exceptions: StoredException[];
+  figures: FigureEvidence[];
+  verified: VerifierResult;
+  faithful: VerifierResult;
+} => {
+  const rawCitations = parsed.citations ?? [];
+  // A citation with no verifiable quote lends authority to whatever the prose
+  // claims next to it — "2.5 feet" shipped beside a quoteless row. Drop them;
+  // a missing source must read as missing, never as a blank badge of honor.
+  const citations = (
+    rawCitations.length > 0
+      ? rawCitations
+          .map((citation) => {
+            const index = citation.chunkIndex;
+            if (typeof index !== "number" || index < 0 || index >= chunks.length) {
+              return null;
+            }
+            const chunk = chunks[index];
+            // Prefer the model's own quote; fall back to its directAnswer,
+            // then to the chunk's opening sentence. Each is verified against
+            // the chunk, so an unresolvable citation is dropped, not served.
+            return buildCitation(citation.quote, chunk, question);
+          })
+          .filter((entry): entry is SourceCitation => entry !== null)
+      : chunks
+          .slice(0, 2)
+          .map((chunk) => buildCitation(null, chunk, question))
+          .filter((entry): entry is SourceCitation => entry !== null)
+  ).filter((entry) => entry.quote.trim().length > 0);
+
+  const exceptions = collectStoredExceptions(
+    chunks.map((c) => c.id),
+    citations
+  );
+
+  const figures = buildFigureEvidence(chunks, parsed.figures, allFigures);
+  const rawAnswer = (parsed.answer || citations[0]?.quote || "No answer generated.")
+    .replace(/\s+/g, " ")
+    .split(/\n{2,}/)
+    .slice(0, MAX_ANSWER_PARAGRAPHS)
+    .join("\n\n");
+  const rawDirectAnswer = parsed.directAnswer || citations[0]?.quote || "No direct answer.";
+  const answer = compactToSentences(rawAnswer, 1, MAX_ANSWER_WORDS);
+  const directAnswer = deriveDirectAnswer(question, rawDirectAnswer, citations, conversationPrefix);
+  // Numbers without quotes are how confident wrong answers ship ("2.5 feet"
+  // beside a quoteless row). Verify against the citations that survived: any
+  // measurement the quotes do not state caps the verdict at partial, drops a
+  // headline that states one, and says so in the prose.
+  const verified = verifyAnswerNumbers(question, answer, directAnswer, citations);
+  // Conditional fidelity composes after numbers: a flattened requirement is
+  // the same class of lie by position as an unsupported number.
+  const faithful = verifyConditionalFidelity(
+    verified.answer,
+    verified.directAnswer,
+    citations,
+  );
+
+  let figuresOut = figures;
+  if (visualFirst && chunks.length > 0) {
+    figuresOut = mergeFigureLists(figuresOut, getFigureEvidenceForPages(locationsOf(chunks)));
+  }
+  figuresOut = finalizeFigures(figuresOut, chunks);
+
+  return { citations, exceptions, figures: figuresOut, verified, faithful };
+};
+
 const answerCore = async (
   question: string,
   options: AnswerCoreOptions = {}
@@ -1535,19 +1691,7 @@ const answerCore = async (
   const chapters = [
     ...new Set(candidates.map((c) => c.chunk.chapter).filter((v): v is string => Boolean(v))),
   ];
-  const quoteSet = candidates.map((result) => ({
-    docId: result.chunk.docId,
-    page: result.chunk.page,
-    text: result.chunk.text,
-    section: result.chunk.section ?? null,
-    chapter: result.chunk.chapter ?? null,
-    pageLabel: result.chunk.pageLabel ?? null,
-    standard: result.chunk.standard ?? null,
-    sheetOf: result.chunk.sheetOf ?? null,
-    sheetCount: result.chunk.sheetCount ?? null,
-    score: result.confidence,
-    id: result.chunk.id,
-  }));
+  const quoteSet = candidates.map(toRetrievalChunk);
   const locations = locationsOf(quoteSet);
   const docs = [...new Set(quoteSet.map((chunk) => chunk.docId))];
 
@@ -1763,63 +1907,8 @@ const answerCore = async (
     return { answer: fallback, usage: null };
   }
 
-  const rawCitations = parsed.citations ?? [];
-  // A citation with no verifiable quote lends authority to whatever the prose
-  // claims next to it — "2.5 feet" shipped beside a quoteless row. Drop them;
-  // a missing source must read as missing, never as a blank badge of honor.
-  const citations = (
-    rawCitations.length > 0
-      ? rawCitations
-          .map((citation) => {
-            const index = citation.chunkIndex;
-            if (typeof index !== "number" || index < 0 || index >= quoteSet.length) {
-              return null;
-            }
-            const chunk = quoteSet[index];
-            // Prefer the model's own quote; fall back to its directAnswer,
-            // then to the chunk's opening sentence. Each is verified against
-            // the chunk, so an unresolvable citation is dropped, not served.
-            return buildCitation(citation.quote, chunk, question);
-          })
-          .filter((entry): entry is SourceCitation => entry !== null)
-      : quoteSet
-          .slice(0, 2)
-          .map((chunk) => buildCitation(null, chunk, question))
-          .filter((entry): entry is SourceCitation => entry !== null)
-  ).filter((entry) => entry.quote.trim().length > 0);
-
-  const exceptions = collectStoredExceptions(
-    quoteSet.map((c) => c.id),
-    citations
-  );
-
-  const figures = buildFigureEvidence(quoteSet, parsed.figures, allFigures);
-  const rawAnswer = (parsed.answer || citations[0]?.quote || "No answer generated.")
-    .replace(/\s+/g, " ")
-    .split(/\n{2,}/)
-    .slice(0, MAX_ANSWER_PARAGRAPHS)
-    .join("\n\n");
-  const rawDirectAnswer = parsed.directAnswer || citations[0]?.quote || "No direct answer.";
-  const answer = compactToSentences(rawAnswer, 1, MAX_ANSWER_WORDS);
-  const directAnswer = deriveDirectAnswer(question, rawDirectAnswer, citations, conversationPrefix);
-  // Numbers without quotes are how confident wrong answers ship ("2.5 feet"
-  // beside a quoteless row). Verify against the citations that survived: any
-  // measurement the quotes do not state caps the verdict at partial, drops a
-  // headline that states one, and says so in the prose.
-  const verified = verifyAnswerNumbers(question, answer, directAnswer, citations);
-  // Conditional fidelity composes after numbers: a flattened requirement is
-  // the same class of lie by position as an unsupported number.
-  const faithful = verifyConditionalFidelity(
-    verified.answer,
-    verified.directAnswer,
-    citations,
-  );
-
-  let figuresOut = figures;
-  if (visualFirst && quoteSet.length > 0) {
-    figuresOut = mergeFigureLists(figuresOut, getFigureEvidenceForPages(locationsOf(quoteSet)));
-  }
-  figuresOut = finalizeFigures(figuresOut, quoteSet);
+  const { citations, exceptions, figures: figuresOut, verified, faithful } =
+    assembleModelAnswer(parsed, quoteSet, question, conversationPrefix, allFigures, visualFirst);
 
   const response: ChatAnswer = {
     answer: faithful.answer,
@@ -1843,16 +1932,224 @@ const answerCore = async (
     ),
   };
 
+  /**
+   * The Phase 4 second attempt: one re-search with the first top-1's manual
+   * demoted out of play, then the same verifiers on the result.
+   *
+   * Hard single hop — the caller fires this at most once per question. The
+   * second attempt is judged by the same rules as the first: a still-failing
+   * verdict, a still-thin coverage, or a second generation that throws before
+   * emitting all refuse through the ordinary not-covered path (nearest
+   * chapters, no new UI); only a verdict that passes AND clears coverage is
+   * rescued, and a rescue is capped at partial when the first attempt's
+   * verdict was worse.
+   */
+  const runRetriedAnswer = async (args: {
+    triggers: Array<"numbers" | "fidelity" | "grayBand">;
+    droppedManual: ManualId | null;
+    verdictBefore: RetryVerdict;
+  }): Promise<AnswerOutcome> => {
+    const { candidates: retryCandidates, summary: retrySummary } = await retrieveChunks(
+      retrievalQuery,
+      { visualFirst, dropManual: args.droppedManual ?? undefined }
+    );
+    const logRetry = (verdictAfter: RetryVerdict | null, outcome: RetryOutcome) => {
+      retryLog.push({
+        at: new Date().toISOString(),
+        question,
+        triggers: args.triggers,
+        droppedManual: args.droppedManual,
+        coverageBefore: summary.coverage,
+        coverageAfter: retrySummary.coverage,
+        verdictBefore: args.verdictBefore,
+        verdictAfter,
+        outcome,
+      });
+      if (retryLog.length > RETRY_LOG_LIMIT) {
+        retryLog.shift();
+      }
+    };
+
+    // The existing refusal shape: nearest chapters, no sources claimed as
+    // evidence, the one-line prose. Reused verbatim — a retry that fails is
+    // the same not-covered verdict, not a new kind of answer.
+    const refuse = (): ChatAnswer => {
+      const nearMisses = getNearestChunks(retrievalQuery, 3);
+      const chapters = [...new Set(nearMisses.map((c) => c.chapter).filter(Boolean))] as string[];
+      return {
+        answer: NOT_COVERED_ANSWER,
+        directAnswer: "",
+        citations: nearMisses
+          .map((chunk) => buildCitation(null, chunk, question))
+          .filter((c): c is SourceCitation => c !== null),
+        figures: [],
+        exceptions: [],
+        grounding: "none",
+        notCovered: true,
+        retrievalSummary: {
+          totalCandidates: retryCandidates.length,
+          matchedChunks: retrySummary.matchedChunks,
+          confidence: retrySummary.confidence,
+          coverage: retrySummary.coverage,
+          notCovered: true,
+          intent: retrySummary.intent.trigger,
+          chapters,
+          docs: [...new Set(nearMisses.map((c) => c.docId))],
+          latencyMs: Date.now() - requestStart,
+        },
+      };
+    };
+
+    if (retryCandidates.length === 0 || retrySummary.notCovered) {
+      logRetry(null, "refused");
+      const refused = refuse();
+      await emit({ kind: "write", source: "near-miss" });
+      await emit({ kind: "text", delta: refused.answer });
+      return { answer: refused, usage: null };
+    }
+
+    const retryQuoteSet = retryCandidates.map(toRetrievalChunk);
+    const provisional = retryQuoteSet
+      .slice(0, 4)
+      .map((chunk) => buildCitation(null, chunk, question))
+      .filter((c): c is SourceCitation => c !== null);
+    const retryExceptions = collectStoredExceptions(
+      retryQuoteSet.map((c) => c.id),
+      provisional
+    );
+    const retryPrompt = answerPrompt(
+      question,
+      retryQuoteSet.slice(0, MAX_PROMPT_CHUNKS),
+      conversationPrefix,
+      retryExceptions,
+      { fullTextChunkId: retryQuoteSet[0]?.id }
+    );
+
+    let parsed: ParsedModelResponse;
+    let usage: OllamaUsage | null = null;
+    let streamedText = false;
+    try {
+      if (sink) {
+        await emit({ kind: "write", source: "model" });
+        const streamed = await streamAnswerByModel(retryPrompt, options.signal, async (delta) => {
+          streamedText = true;
+          await emit({ kind: "text", delta });
+        });
+        parsed = streamed.response;
+        usage = streamed.usage;
+      } else {
+        const answered = await answerByModel(retryPrompt);
+        parsed = answered.response;
+        usage = answered.usage;
+      }
+    } catch (error) {
+      // Prose already on the wire cannot be taken back. A second generation
+      // that fails before emitting keeps the first answer — it was verified
+      // and served; refusing a question already answered would be worse.
+      if (streamedText || options.signal?.aborted) {
+        throw error;
+      }
+      logRetry(null, "error");
+      return { answer: response, usage };
+    }
+
+    const assembled = assembleModelAnswer(
+      parsed,
+      retryQuoteSet,
+      question,
+      conversationPrefix,
+      allFigures,
+      visualFirst
+    );
+    const verdictAfter: RetryVerdict = {
+      numbersOk: assembled.verified.ok,
+      fidelityOk: assembled.faithful.ok,
+    };
+
+    if (
+      !assembled.verified.ok ||
+      !assembled.faithful.ok ||
+      assembled.citations.length === 0
+    ) {
+      logRetry(verdictAfter, "refused");
+      const refused = refuse();
+      await emit({ kind: "write", source: "near-miss" });
+      await emit({ kind: "text", delta: refused.answer });
+      return { answer: refused, usage: null };
+    }
+
+    logRetry(verdictAfter, "rescued");
+    const rescued: ChatAnswer = {
+      answer: assembled.faithful.answer,
+      directAnswer: assembled.faithful.directAnswer,
+      citations: assembled.citations,
+      figures: assembled.figures,
+      exceptions: assembled.exceptions,
+      // Rescued by a re-search: the second attempt passed, but when the first
+      // attempt's verdict was worse the answer keeps the partial cap it
+      // earned — same semantics as the first attempt's grounding.
+      grounding:
+        assembled.citations.length < 2 ||
+        !args.verdictBefore.numbersOk ||
+        !args.verdictBefore.fidelityOk
+          ? "partial"
+          : "esr",
+      notCovered: false,
+      retrievalSummary: retrievalSummaryFor(
+        retryCandidates.length,
+        retrySummary,
+        [
+          ...new Set(
+            retryQuoteSet.map((c) => c.chapter).filter((v): v is string => Boolean(v))
+          ),
+        ],
+        Date.now() - requestStart,
+        [...new Set(retryQuoteSet.map((c) => c.docId))]
+      ),
+    };
+    return { answer: rescued, usage };
+  };
+
+  // --- Phase 4 trigger --------------------------------------------------------
+  // Fires when the first answer failed a verifier OR its top-1 coverage sits
+  // in the gray band — and never on a refusal (citations.length === 0 is the
+  // notCovered verdict; re-searching a question already refused is wrong).
+  // One hop, hard: this block runs at most once per question.
+  const retryTriggers: Array<"numbers" | "fidelity" | "grayBand"> = [];
+  if (citations.length > 0) {
+    if (!verified.ok) retryTriggers.push("numbers");
+    if (!faithful.ok) retryTriggers.push("fidelity");
+    if (summary.coverage >= RETRY_GRAY_MIN && summary.coverage < RETRY_GRAY_MAX) {
+      retryTriggers.push("grayBand");
+    }
+  }
+
+  if (retryTriggers.length === 0) {
+    saveCacheEntry(
+      question,
+      response,
+      config.EMBEDDING_CACHE_TTL_SECONDS,
+      visualFirst,
+      conversationPrefix,
+      extractive
+    );
+    return { answer: response, usage };
+  }
+
+  const retryOutcome = await runRetriedAnswer({
+    triggers: retryTriggers,
+    droppedManual: quoteSet[0]?.docId ?? null,
+    verdictBefore: { numbersOk: verified.ok, fidelityOk: faithful.ok },
+  });
   saveCacheEntry(
     question,
-    response,
+    retryOutcome.answer,
     config.EMBEDDING_CACHE_TTL_SECONDS,
     visualFirst,
     conversationPrefix,
     extractive
   );
-
-  return { answer: response, usage };
+  return { answer: retryOutcome.answer, usage: retryOutcome.usage };
 };
 
 /** One-shot answer. Callers that want prose as it is produced give `sink`. */

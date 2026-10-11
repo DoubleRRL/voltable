@@ -1059,7 +1059,7 @@ export const getFigureEvidenceForPages = (
  * regression that did not exist). Old rows are hashed without the version, so
  * a bump retires them without a cache clear.
  */
-export const PIPELINE_VERSION = 3;
+export const PIPELINE_VERSION = 4;
 
 const cacheKey = (
   question: string,
