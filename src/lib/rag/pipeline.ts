@@ -17,7 +17,7 @@ import type {
   StoredChunk,
   StoredException,
 } from "@/lib/rag/types";
-import { NOT_COVERED_THRESHOLD, retrieveChunks, retrieveFused } from "@/lib/rag/retrieval";
+import { NOT_COVERED_THRESHOLD, retrieveChunks } from "@/lib/rag/retrieval";
 import {
   extractMeasurements,
   measureKey,
@@ -27,7 +27,6 @@ import { MANUALS, evidencePageLink } from "@/lib/rag/docs";
 import type { ManualId } from "@/lib/rag/docs";
 import {
   askOllama,
-  askRewriteModel,
   streamOllama,
   type ModelResult,
   type OllamaUsage,
@@ -94,17 +93,6 @@ export type RetryEvent = {
   /** null when the second attempt produced no verdict (coverage refusal or a throw). */
   verdictAfter: RetryVerdict | null;
   outcome: RetryOutcome;
-  /**
-   * Phase 5 rewrite, when it ran. Alternates fuse candidates by RRF but the
-   * coverage gate still reads the user's own words; a rescue whose citations
-   * all came from rewrite-only chunks is capped at partial.
-   */
-  rewrite: {
-    alternates: string[];
-    manualHint: string | null;
-    legs: number;
-    rewriteOnlyRescue: boolean;
-  } | null;
 };
 
 const RETRY_LOG_LIMIT = 50;
@@ -1961,44 +1949,10 @@ const answerCore = async (
     droppedManual: ManualId | null;
     verdictBefore: RetryVerdict;
   }): Promise<AnswerOutcome> => {
-    // Phase 5: the rewrite as candidate generator. Best-effort and gated —
-    // it runs only here (first attempt already showed weakness), never on the
-    // common path. A null rewrite (disabled, timed out, malformed) proceeds
-    // with single-query retrieval exactly as before Phase 5.
-    const config = getAppConfig();
-    const rewrite = config.REWRITE_ENABLED ? await askRewriteModel(retrievalQuery) : null;
-    const rewriteQueries =
-      rewrite === null
-        ? []
-        : [rewrite.canonical, ...rewrite.alternates].filter(
-            (q) => q.trim().length > 0
-          );
-    const fused =
-      rewriteQueries.length > 0
-        ? await retrieveFused(retrievalQuery, rewriteQueries, {
-            visualFirst,
-            dropManual: args.droppedManual ?? undefined,
-          })
-        : null;
-    const single =
-      fused !== null
-        ? null
-        : await retrieveChunks(retrievalQuery, {
-            visualFirst,
-            dropManual: args.droppedManual ?? undefined,
-          });
-    const retryCandidates = fused !== null ? fused.candidates : (single as NonNullable<typeof single>).candidates;
-    const retrySummary = fused !== null ? fused.summary : (single as NonNullable<typeof single>).summary;
-    const rewriteOnlyIds = fused !== null ? fused.rewriteOnlyIds : new Set<string>();
-    const rewriteInfo =
-      rewrite === null
-        ? null
-        : {
-            alternates: rewriteQueries,
-            manualHint: rewrite.manualHint,
-            legs: fused !== null ? fused.legs : 1,
-            rewriteOnlyRescue: false,
-          };
+    const { candidates: retryCandidates, summary: retrySummary } = await retrieveChunks(
+      retrievalQuery,
+      { visualFirst, dropManual: args.droppedManual ?? undefined }
+    );
     const logRetry = (verdictAfter: RetryVerdict | null, outcome: RetryOutcome) => {
       retryLog.push({
         at: new Date().toISOString(),
@@ -2010,7 +1964,6 @@ const answerCore = async (
         verdictBefore: args.verdictBefore,
         verdictAfter,
         outcome,
-        rewrite: rewriteInfo,
       });
       if (retryLog.length > RETRY_LOG_LIMIT) {
         retryLog.shift();
@@ -2126,28 +2079,6 @@ const answerCore = async (
     }
 
     logRetry(verdictAfter, "rescued");
-    // A rescue whose citations all came from rewrite-only chunks is capped
-    // at partial: the user's own words could not have produced it, so it
-    // carries less grounding than a rescue the original query also reaches.
-    // Citations hold verified quotes (exact substrings of their chunk), so
-    // the quote maps each citation back to its chunk.
-    const citedIds = new Set(
-      assembled.citations.flatMap((c) => {
-        const owner = retryQuoteSet.find((q) => q.text.includes(c.quote));
-        return owner ? [owner.id] : [];
-      })
-    );
-    const rewriteOnlyRescue =
-      rewriteInfo !== null &&
-      citedIds.size > 0 &&
-      [...citedIds].every((id) => rewriteOnlyIds.has(id));
-    if (rewriteInfo !== null) {
-      rewriteInfo.rewriteOnlyRescue = rewriteOnlyRescue;
-      const last = retryLog[retryLog.length - 1];
-      if (last) {
-        last.rewrite = { ...rewriteInfo };
-      }
-    }
     const rescued: ChatAnswer = {
       answer: assembled.faithful.answer,
       directAnswer: assembled.faithful.directAnswer,
@@ -2160,8 +2091,7 @@ const answerCore = async (
       grounding:
         assembled.citations.length < 2 ||
         !args.verdictBefore.numbersOk ||
-        !args.verdictBefore.fidelityOk ||
-        rewriteOnlyRescue
+        !args.verdictBefore.fidelityOk
           ? "partial"
           : "esr",
       notCovered: false,
