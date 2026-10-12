@@ -124,6 +124,37 @@ const schema = z.object({
     .string()
     .optional()
     .transform((value) => intFromEnv(value, 320)),
+  /**
+   * Small model for the Phase 5 query rewrite. It only ever runs inside the
+   * Phase 4 retry (first attempt already showed weakness), so the common path
+   * stays at one model call. Best-effort: any failure proceeds with the
+   * original query alone.
+   */
+  OLLAMA_REWRITE_MODEL: z.string().default("qwen2.5:3b"),
+  /** Hard budget for the rewrite call — it must never rival an answer call. */
+  REWRITE_TIMEOUT_MS: z
+    .string()
+    .optional()
+    .transform((value) => intFromEnv(value, 8000)),
+  REWRITE_MAX_TOKENS: z
+    .string()
+    .optional()
+    .transform((value) => intFromEnv(value, 80)),
+  /**
+   * Kill-switch for the rewrite, default OFF. Measured on 2026-10-12 over
+   * data/eval/real.jsonl (14 rows, 4 retry fires): zero rewrite-only rescues,
+   * one ambiguous wrong-manual rescue, unreliable alternates from the small
+   * model (concept swaps, echo artifacts), +1-4s per firing row. The one
+   * vocabulary-gap row Phase 5 targeted answers without ever reaching the
+   * retry. Opt back in with "1"/"true" when the vocabulary-gap residual
+   * thickens; the mechanism (fallback, own-words gate, partial cap) is
+   * sound and stays tested. "0"/"false" (or unset) runs single-query
+   * retrieval exactly as before Phase 5.
+   */
+  REWRITE_ENABLED: z
+    .string()
+    .optional()
+    .transform((value) => value === "1" || value === "true"),
   /** When true, skip LLM and use extractive fallback only (faster, fully grounded). */
   EXTRACTIVE_ANSWER: z
     .string()
