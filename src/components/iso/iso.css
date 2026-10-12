@@ -24,40 +24,28 @@
   --chapter-hue: 28;
 }
 
-.iso-padmount {
-  --chapter-hue: 330;
-}
-
-.iso-switchgear {
-  --chapter-hue: 90;
-}
-
-.iso-meterpanel {
+.iso-omnirupter {
   --chapter-hue: 210;
 }
 
-.iso-guy {
-  --chapter-hue: 40;
-}
-
-.iso-cutout {
+.iso-fuse {
   --chapter-hue: 150;
 }
 
-.iso-junction {
-  --chapter-hue: 300;
+.iso-crossarm {
+  --chapter-hue: 40;
 }
 
-.iso-ctcabinet {
+.iso-guyanchor {
+  --chapter-hue: 90;
+}
+
+.iso-boredpole {
+  --chapter-hue: 28;
+}
+
+.iso-grade {
   --chapter-hue: 180;
-}
-
-.iso-riser {
-  --chapter-hue: 20;
-}
-
-.iso-recloser {
-  --chapter-hue: 260;
 }
 
 @keyframes iso-glow {

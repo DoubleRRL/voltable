@@ -7,16 +7,12 @@ import { motion, useReducedMotion } from "framer-motion";
 import { spring } from "@/lib/springs";
 import { clamp01 } from "./scatter";
 
-import { PoleFigure } from "./PoleFigure";
-import { PadmountFigure } from "./PadmountFigure";
-import { SwitchgearFigure } from "./SwitchgearFigure";
-import { MeterPanelFigure } from "./MeterPanelFigure";
-import { GuyAnchorFigure } from "./GuyAnchorFigure";
-import { DeadEndPoleFigure } from "./DeadEndPoleFigure";
-import { CutoutFigure } from "./CutoutFigure";
-import { PadmountSwitchgearFigure } from "./PadmountSwitchgearFigure";
-import { CtCabinetFigure } from "./CtCabinetFigure";
-import { RiserFigure } from "./RiserFigure";
+import { SwitchFigure } from "./SwitchFigure";
+import { FuseFigure } from "./FuseFigure";
+import { CrossarmFigure } from "./CrossarmFigure";
+import { GuyAnchorFigure2 } from "./GuyAnchorFigure2";
+import { BoredPoleFigure } from "./BoredPoleFigure";
+import { GradeFigure } from "./GradeFigure";
 
 type FigureProps = { transition?: { progress: number; phase: "out" | "in" } };
 type FigureComponent = (props: FigureProps) => React.JSX.Element;
@@ -46,16 +42,12 @@ type FigureComponent = (props: FigureProps) => React.JSX.Element;
  * the page.
  */
 const FIGURES: Array<{ id: string; label: string; Component: FigureComponent }> = [
-  { id: "pole", label: "Distribution pole", Component: PoleFigure },
-  { id: "padmount", label: "Padmount transformer", Component: PadmountFigure },
-  { id: "switchgear", label: "1200 amp switchgear", Component: SwitchgearFigure },
-  { id: "meterpanel", label: "Meter panel and service", Component: MeterPanelFigure },
-  { id: "guy", label: "Guy wire and anchor", Component: GuyAnchorFigure },
-  { id: "deadend", label: "Dead-end guy pole", Component: DeadEndPoleFigure },
-  { id: "cutout", label: "Cutout and arrester", Component: CutoutFigure },
-  { id: "pme", label: "PME pad-mount switchgear", Component: PadmountSwitchgearFigure },
-  { id: "ctcabinet", label: "CT cabinet and meter", Component: CtCabinetFigure },
-  { id: "riser", label: "Riser and U-guard", Component: RiserFigure },
+  { id: "switch", label: "Omni-Rupter pole switch", Component: SwitchFigure },
+  { id: "fuse", label: "15 kV open fuse cutout", Component: FuseFigure },
+  { id: "crossarm", label: "Double crossarm dead-end", Component: CrossarmFigure },
+  { id: "guyanchor", label: "Triple-eye anchor guying", Component: GuyAnchorFigure2 },
+  { id: "boredpole", label: "Through-bored pole", Component: BoredPoleFigure },
+  { id: "grade", label: "Pole setting at grade", Component: GradeFigure },
 ];
 
 const DWELL_MS = 7000;
