@@ -41,9 +41,13 @@ export const UNIT_ALIASES: Record<string, string[]> = {
   pools: ["pool", "swimming"],
   swimming: ["pool", "pools"],
   // Plurals the corpus never uses: planners ask "guys" and "multiplex",
-  // the manuals write "guy" and "duplex/triplex/quadruplex".
+  // the manuals write "guy" and "duplex/triplex/quadruplex". Same split for
+  // anchors: the rules write "anchors" ("spacing between the plate anchors")
+  // while questions ask about "an anchor".
   guys: ["guy"],
   guy: ["guys"],
+  anchors: ["anchor"],
+  anchor: ["anchors"],
   multiplex: ["duplex", "triplex", "quadruplex"],
   duplex: ["multiplex"],
   triplex: ["multiplex"],

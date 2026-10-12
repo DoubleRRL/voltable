@@ -54,8 +54,8 @@
     filter: none;
   }
   35% {
-    opacity: 0.35;
-    filter: drop-shadow(0 0 3px hsl(var(--chapter-hue), 95%, 62%));
+    opacity: 0.6;
+    filter: drop-shadow(0 0 7px hsl(var(--chapter-hue), 95%, 72%));
   }
   100% {
     opacity: 1;
@@ -64,5 +64,5 @@
 }
 
 .iso-figure svg .glow-target {
-  animation: iso-glow 600ms var(--ik-ease);
+  animation: iso-glow 600ms var(--ik-ease) 2;
 }

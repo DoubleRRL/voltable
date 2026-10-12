@@ -20,6 +20,10 @@
 # build output and generated assets
 /dist/
 /data/
+# The hand-filed failure set IS source: 16 hand-verified rows that the eval
+# gates are calibrated against. Generated eval artifacts (perturbed rows,
+# reports, the sqlite index) stay out.
+!/data/eval/real.jsonl
 /public/icons/
 /public/images/
 /public/favicon*.ico

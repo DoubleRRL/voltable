@@ -348,7 +348,13 @@ export const NOT_COVERED_THRESHOLD = Number(process.env.ESR_NOT_COVERED_THRESHOL
 const sectionMatchScore = (section: string | null | undefined, contentTokens: string[]) => {
   if (!section || contentTokens.length === 0) return 0;
   const hay = new Set(tokenize(section));
-  return contentTokens.some((t) => hay.has(t)) ? W_SECTION : 0;
+  // Same alias expansion as body coverage: a section reading "Anchors and
+  // Rods" is about the question's "anchor" by the same precedent that lets
+  // body text match across the alias table. Without it a title stub whose
+  // section happens to use the singular outranks the rule whose section
+  // uses the plural.
+  const needles = [...contentTokens, ...aliasTokens(contentTokens)];
+  return needles.some((t) => hay.has(t)) ? W_SECTION : 0;
 };
 
 type Scored = { chunk: StoredChunk; score: number; confidence: number; bm25: number; coverage: number };
@@ -826,7 +832,63 @@ export const retrieveChunks = async (
     return out;
   })();
 
-  const top = withLegends[0];
+  // Page companions: the quotable number often lives in a same-page bullet
+  // the question's words never match. "Closest anchor to an existing one"
+  // shares one token with "4 feet for installations up to 10,000 lbs", so no
+  // ranking can surface it — yet it sits on the same page as the rule chunk
+  // that does rank. Table legends already ride this way; prose anchors get
+  // the same treatment: same manual and page, short text only (criteria
+  // prose included — the framing a bare bullet is uninterpretable without),
+  // sharing a token or carrying a measurement, capped at two, never above
+  // the anchor.
+  //
+  // Fires only on a solid top-1 (coverage at or above the gate): companions
+  // amplify a confident anchor, and on a shaky one they amplify noise —
+  // measured on perturbed phrasings, unguarded companions bury the right
+  // page under the wrong page's furniture.
+  const withCompanions = (() => {
+    const anchor = withLegends[0];
+    if (!anchor) return withLegends;
+    if ((anchor.coverage ?? 0) < NOT_COVERED_THRESHOLD) return withLegends;
+    const seen = new Set(withLegends.map((s) => s.chunk.id));
+    const needles = new Set([...intent.contentTokens, ...aliasTokens(intent.contentTokens)]);
+    // Both conditions, not either: a shared token without a number is page
+    // furniture restating the topic, and a number without a shared token is
+    // an unrelated dimension. The quotable criterion has both — the topic
+    // word that ties it to the question and the measurement that answers it.
+    const fresh = getShortTextChunksByPages(
+      [{ docId: anchor.chunk.docId, page: anchor.chunk.page }],
+      300
+    ).filter((c) => {
+      if (seen.has(c.id)) return false;
+      if (/glossar/i.test(c.section ?? "")) return false;
+      const hay = new Set(tokenizeWithSymbols(expandShorthand(c.text)));
+      const shares = [...needles].some((t) => hay.has(t));
+      return shares && extractMeasurements(c.text).length > 0;
+    });
+    if (fresh.length === 0) return withLegends;
+    const [first, second] = fresh;
+    const extras = [first, second].filter(
+      (c): c is StoredChunk => c !== undefined
+    );
+    const out = [withLegends[0] as (typeof withLegends)[number]];
+    extras.forEach((c, k) => {
+      seen.add(c.id);
+      out.push({
+        ...scoreChunk(c, intent, bm25ById, NO_MANUAL_PRIOR),
+        score: (withLegends[0] as (typeof withLegends)[number]).score - 0.001 * (k + 1),
+      });
+    });
+    for (const s of withLegends.slice(1)) {
+      if (!seen.has(s.chunk.id)) {
+        seen.add(s.chunk.id);
+        out.push(s);
+      }
+    }
+    return out;
+  })();
+
+  const top = withCompanions[0];
   const confidence = top?.confidence ?? 0;
   const coverage = top?.coverage ?? 0;
   // Coverage of the best chunk is the gate; confidence is reported alongside it
@@ -839,7 +901,7 @@ export const retrieveChunks = async (
   // and setback substance (feet/property/line) — no one chunk holds both, so
   // the top-1 gate failed an answerable question. The anchor floor keeps four
   // quarter-matching scraps from passing as a set.
-  const gateSlice = withLegends.slice(0, config.RETRIEVAL_TOP_K);
+  const gateSlice = withCompanions.slice(0, config.RETRIEVAL_TOP_K);
   const jointHit = new Set<string>();
   let jointMax = 0;
   if (intent.contentTokens.length > 0) {
@@ -860,7 +922,7 @@ export const retrieveChunks = async (
       !(jointCoverage >= 0.7 && jointMax >= 0.35));
 
   return {
-    candidates: notCovered ? [] : withLegends.slice(0, config.RETRIEVAL_TOP_K),
+    candidates: notCovered ? [] : withCompanions.slice(0, config.RETRIEVAL_TOP_K),
     summary: {
       totalChunks: chunks.length,
       // The FTS candidate pool, i.e. passages BM25 matched at all.
