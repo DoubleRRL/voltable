@@ -51,12 +51,15 @@
 @keyframes iso-glow {
   0% {
     opacity: 1;
+    filter: none;
   }
   35% {
-    opacity: 0.2;
+    opacity: 0.35;
+    filter: drop-shadow(0 0 3px hsl(var(--chapter-hue), 95%, 62%));
   }
   100% {
     opacity: 1;
+    filter: none;
   }
 }
 
