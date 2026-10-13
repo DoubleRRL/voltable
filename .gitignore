@@ -20,6 +20,13 @@
 # build output and generated assets
 /dist/
 /data/
+# Project-local skills. The fluid-functionalism skill ships a bundled
+# playwright install under scripts/node_modules (~13MB); the SKILL.md files
+# are tiny and ARE worth tracking, the deps are not. Everything else here is
+# build output: nothing app-related belongs in .opencode/ except skills.
+/.opencode/skills/*/node_modules/
+/.opencode/skills/*/scripts/node_modules/
+/.opencode/skills/**/node_modules/
 # The hand-filed failure set IS source: 16 hand-verified rows that the eval
 # gates are calibrated against. Generated eval artifacts (perturbed rows,
 # reports, the sqlite index) stay out.
