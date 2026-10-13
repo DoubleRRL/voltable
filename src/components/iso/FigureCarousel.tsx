@@ -7,12 +7,10 @@ import { motion, useReducedMotion } from "framer-motion";
 import { spring } from "@/lib/springs";
 import { clamp01 } from "./scatter";
 
-import { SwitchFigure } from "./SwitchFigure";
-import { FuseFigure } from "./FuseFigure";
-import { CrossarmFigure } from "./CrossarmFigure";
-import { GuyAnchorFigure2 } from "./GuyAnchorFigure2";
-import { BoredPoleFigure } from "./BoredPoleFigure";
-import { GradeFigure } from "./GradeFigure";
+import { ArmingBracketFigure } from "./ArmingBracketFigure";
+import { DoubleDeadendFigure } from "./DoubleDeadendFigure";
+import { TransformerFigure } from "./TransformerFigure";
+import { SidewalkGuyFigure } from "./SidewalkGuyFigure";
 
 type FigureProps = { transition?: { progress: number; phase: "out" | "in" } };
 type FigureComponent = (props: FigureProps) => React.JSX.Element;
@@ -42,12 +40,10 @@ type FigureComponent = (props: FigureProps) => React.JSX.Element;
  * the page.
  */
 const FIGURES: Array<{ id: string; label: string; Component: FigureComponent }> = [
-  { id: "switch", label: "Omni-Rupter pole switch", Component: SwitchFigure },
-  { id: "fuse", label: "15 kV open fuse cutout", Component: FuseFigure },
-  { id: "crossarm", label: "Double crossarm dead-end", Component: CrossarmFigure },
-  { id: "guyanchor", label: "Triple-eye anchor guying", Component: GuyAnchorFigure2 },
-  { id: "boredpole", label: "Through-bored pole", Component: BoredPoleFigure },
-  { id: "grade", label: "Pole setting at grade", Component: GradeFigure },
+  { id: "bracket", label: "Double-arming brackets", Component: ArmingBracketFigure },
+  { id: "deadend", label: "Double dead-end with line conductor", Component: DoubleDeadendFigure },
+  { id: "transformer", label: "Pole-top transformer", Component: TransformerFigure },
+  { id: "sidewalk", label: "Sidewalk anchor guy", Component: SidewalkGuyFigure },
 ];
 
 const DWELL_MS = 7000;

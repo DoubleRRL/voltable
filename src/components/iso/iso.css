@@ -24,28 +24,20 @@
   --chapter-hue: 28;
 }
 
-.iso-omnirupter {
+.iso-bracket {
   --chapter-hue: 210;
 }
 
-.iso-fuse {
-  --chapter-hue: 150;
-}
-
-.iso-crossarm {
+.iso-deadend {
   --chapter-hue: 40;
 }
 
-.iso-guyanchor {
+.iso-transformer {
   --chapter-hue: 90;
 }
 
-.iso-boredpole {
-  --chapter-hue: 28;
-}
-
-.iso-grade {
-  --chapter-hue: 180;
+.iso-sidewalk {
+  --chapter-hue: 150;
 }
 
 @keyframes iso-glow {
