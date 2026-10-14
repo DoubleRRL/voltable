@@ -48,6 +48,12 @@ export const UNIT_ALIASES: Record<string, string[]> = {
   guy: ["guys"],
   anchors: ["anchor"],
   anchor: ["anchors"],
+  // Same plural split for the metering vocabulary: questions ask "meters",
+  // the rule writes "meter sockets", and neither side meets the other.
+  meters: ["meter"],
+  meter: ["meters"],
+  sockets: ["socket"],
+  socket: ["sockets"],
   multiplex: ["duplex", "triplex", "quadruplex"],
   duplex: ["multiplex"],
   triplex: ["multiplex"],

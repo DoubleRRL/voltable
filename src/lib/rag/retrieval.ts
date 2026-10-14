@@ -324,9 +324,12 @@ const APPROVAL_PATTERN =
 const RULE_PATTERN =
   /\b(shall not|must not|shall|must|required|minimum|prohibited)\b/i;
 // Digits or spelled-out numbers: spec prose writes "three feet" as often as
-// "3 feet", and the rule test must see both.
+// "3 feet", and the rule test must see both. "Meter sockets" rides the unit
+// list as a compound noun only — a count threshold ("more than six meter
+// sockets") is the shape a how-many/can-I approval answer takes, while bare
+// "meter" (panel, room, device) must never trigger it.
 const RULE_MEASURE_PATTERN =
-  /(\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\s*(inches|inch|feet|foot|volts|volt|amps|ampere|amperes|amp|percent|pct|%|in\b|ft\b|["'′″])/i;
+  /(\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\s*(inches|inch|feet|foot|meter sockets?|volts|volt|amps|ampere|amperes|amp|percent|pct|%|in\b|ft\b|["'′″])/i;
 
 /**
  * Minimum top-1 token coverage for the ESR to be considered to cover a

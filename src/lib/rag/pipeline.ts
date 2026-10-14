@@ -1651,11 +1651,11 @@ const answerCore = async (
     await emit({ kind: "retrieved", retrieved });
   };
 
-  if (candidates.length === 0) {
-    // Nothing cleared the threshold. The verdict is stated exactly once, by the
-    // not-covered notice under the card; the badge says it in one word and the
-    // answer prose says what to do about it. Repeating it here as well made one
-    // finding look like three separate problems.
+  // The not-covered refusal, shared by every path that ends without an
+  // answer: retrieval found nothing, or the model disclaimed the evidence it
+  // was given. One shape, stated once — badge, one-line prose, nearest
+  // chapters — never a Supported badge on an evasion.
+  const refuseAsNotCovered = async (): Promise<AnswerOutcome> => {
     const nearMisses = getNearestChunks(retrievalQuery, 3);
     const chapters = [...new Set(nearMisses.map((c) => c.chapter).filter(Boolean))] as string[];
     const empty: ChatAnswer = {
@@ -1677,7 +1677,7 @@ const answerCore = async (
         intent: summary.intent.trigger,
         chapters,
         docs: [...new Set(nearMisses.map((c) => c.docId))],
-        latencyMs: retrievalLatencyMs,
+        latencyMs: Date.now() - requestStart,
       },
     };
     // Nothing was read, so nothing was found: the near misses are handed back
@@ -1686,6 +1686,14 @@ const answerCore = async (
     await emit({ kind: "write", source: "near-miss" });
     await emit({ kind: "text", delta: empty.answer });
     return { answer: empty, usage: null };
+  };
+
+  if (candidates.length === 0) {
+    // Nothing cleared the threshold. The verdict is stated exactly once, by the
+    // not-covered notice under the card; the badge says it in one word and the
+    // answer prose says what to do about it. Repeating it here as well made one
+    // finding look like three separate problems.
+    return refuseAsNotCovered();
   }
 
   const chapters = [
@@ -1909,6 +1917,21 @@ const answerCore = async (
 
   const { citations, exceptions, figures: figuresOut, verified, faithful } =
     assembleModelAnswer(parsed, quoteSet, question, conversationPrefix, allFigures, visualFirst);
+
+  // Evasion with citations must never wear Supported: an answer whose verdict
+  // disclaims the evidence ("no distance is mentioned in the provided
+  // chunks") makes no claim the citations could support, so the citations
+  // lend authority to nothing and the badge lies. Matched on the direct
+  // answer only — a caveat buried in long prose alongside real findings is
+  // the prompt's own sanctioned caveat, not an evasion.
+  const EVASION_PATTERNS = [
+    /no .* mentioned in the provided chunks/i,
+    /not (specified|mentioned|stated) in (the provided|these|those) (chunks|passages|context)/i,
+    /cannot be determined from the provided (chunks|passages|context)/i,
+  ];
+  if (EVASION_PATTERNS.some((re) => re.test(faithful.directAnswer))) {
+    return refuseAsNotCovered();
+  }
 
   const response: ChatAnswer = {
     answer: faithful.answer,

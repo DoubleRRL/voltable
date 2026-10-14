@@ -11,6 +11,8 @@
     "ingest:manuals:force": "tsx scripts/ingest-manuals.ts --force-render",
     "lexicon:build": "tsx scripts/build-lexicon.ts",
     "build:eval": "tsx scripts/build-eval-set.ts",
+    "build:battery": "tsx scripts/build-battery.ts",
+    "battery:page": "tsx scripts/build-battery.ts --page",
     "eval:manuals": "tsx scripts/eval-esr.ts",
     "eval:real": "tsx scripts/eval-real.ts",
     "dev": "next dev -p 3001",

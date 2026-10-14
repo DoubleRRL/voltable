@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voltable question battery — SME review</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 16px; font-size: 13px; }
+  header { position: sticky; top: 0; background: inherit; padding: 8px 0; border-bottom: 2px solid currentColor; z-index: 5; }
+  header .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  #progress { font-weight: 700; }
+  #bar { width: 220px; height: 10px; border: 1px solid currentColor; }
+  #barfill { height: 100%; background: currentColor; width: 0; }
+  table { border-collapse: collapse; width: 100%; margin-top: 8px; }
+  thead th { position: sticky; top: 74px; background: inherit; text-align: left; border-bottom: 2px solid currentColor; padding: 6px; z-index: 4; }
+  tbody td { border-bottom: 1px solid #8884; padding: 6px; vertical-align: top; }
+  tbody tr.suspicious td:first-child { border-left: 4px solid #c88700; }
+  tbody tr.answered { opacity: 0.72; }
+  .tag { display: inline-block; font-size: 11px; border: 1px solid currentColor; border-radius: 8px; padding: 0 6px; margin: 1px 2px 1px 0; white-space: nowrap; }
+  .q { max-width: 340px; }
+  .guess { max-width: 300px; font-size: 12px; opacity: 0.85; }
+  .guess summary { cursor: pointer; }
+  textarea { width: 100%; min-width: 220px; min-height: 52px; font: inherit; font-size: 12px; }
+  input.ref { width: 100%; min-width: 140px; font: inherit; font-size: 12px; }
+  select { font: inherit; }
+  button { font: inherit; cursor: pointer; }
+  .mini { font-size: 11px; padding: 0 5px; }
+  .cov-low { font-weight: 700; }
+  .badge { font-size: 11px; border-radius: 8px; padding: 0 6px; }
+  .badge.partial { border: 1px solid #c88700; }
+  .badge.esr { border: 1px solid #2e7d32; }
+  .badge.none { border: 1px solid #999; }
+</style>
+</head>
+<body>
+<header>
+  <div class="row">
+    <strong>Battery review</strong>
+    <span id="progress">0 / 0 answered</span>
+    <div id="bar"><div id="barfill"></div></div>
+    <label>aspect <select id="fAspect"><option value="">all</option></select></label>
+    <label>manual <select id="fManual"><option value="">all</option></select></label>
+    <label>status <select id="fStatus">
+      <option value="">all</option><option value="todo">unanswered</option>
+      <option value="done">answered</option><option value="susp">suspicious first</option>
+    </select></label>
+    <label>search <input id="fSearch" type="search" placeholder="filter text…"></label>
+    <button id="export">Export JSON</button>
+    <span id="note">Model guesses are UNVERIFIED. Your answer + reference is the verdict.</span>
+  </div>
+</header>
+<table>
+  <thead><tr>
+    <th>#</th><th>tags</th><th>question</th><th>model guess</th>
+    <th>your answer <span title="selectable text; copy buttons on each row">⧉</span></th>
+    <th>your ref</th><th>verdict</th><th></th>
+  </tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+<script id="battery-data" type="application/json">/*__DATA__*/</script>
+<script>
+(function () {
+  const DATA = JSON.parse(document.getElementById("battery-data").textContent);
+  const rows = DATA.rows;
+  const LS_KEY = "voltable-battery-v1";
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(LS_KEY) || "{}"); } catch (e) { saved = {}; }
+  const esc = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+  const aspects = [...new Set(rows.map((r) => r.aspect))].sort();
+  const manuals = [...new Set(rows.map((r) => r.manual))].sort();
+  const fAspect = document.getElementById("fAspect");
+  const fManual = document.getElementById("fManual");
+  aspects.forEach((a) => { const o = document.createElement("option"); o.value = a; o.textContent = a; fAspect.appendChild(o); });
+  manuals.forEach((m) => { const o = document.createElement("option"); o.value = m; o.textContent = m; fManual.appendChild(o); });
+
+  const tbody = document.getElementById("rows");
+  const state = {}; // id -> {answer, ref, verdict}
+  rows.forEach((r) => { state[r.id] = saved[r.id] || { answer: "", ref: "", verdict: "" }; });
+
+  function copyText(t, btn) {
+    const done = () => { if (btn) { const o = btn.textContent; btn.textContent = "✓"; setTimeout(() => (btn.textContent = o), 800); } };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(t).then(done).catch(() => fallback());
+    } else fallback();
+    function fallback() {
+      const ta = document.createElement("textarea");
+      ta.value = t; document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); done(); } catch (e) {}
+      document.body.removeChild(ta);
+    }
+  }
+
+  function persist() {
+    try { localStorage.setItem(LS_KEY, JSON.stringify(state)); } catch (e) {}
+    updateProgress();
+  }
+
+  function updateProgress() {
+    const done = rows.filter((r) => (state[r.id].answer || "").trim() || state[r.id].verdict).length;
+    document.getElementById("progress").textContent = `${done} / ${rows.length} answered`;
+    document.getElementById("barfill").style.width = `${(100 * done) / rows.length}%`;
+    document.querySelectorAll("#rows tr[data-id]").forEach((tr) => {
+      const s = state[tr.dataset.id];
+      tr.classList.toggle("answered", !!(s.answer || "").trim() || !!s.verdict);
+    });
+  }
+
+  function visible(r) {
+    const a = fAspect.value, m = fManual.value, s = document.getElementById("fStatus").value;
+    const q = document.getElementById("fSearch").value.toLowerCase();
+    const st = state[r.id];
+    const answered = !!((st.answer || "").trim() || st.verdict);
+    if (a && r.aspect !== a) return false;
+    if (m && r.manual !== m) return false;
+    if (s === "todo" && answered) return false;
+    if (s === "done" && !answered) return false;
+    if (s === "susp" && !r.suspicious) return false;
+    if (q && !(r.question + " " + (r.guess_answer || "") + " " + (st.answer || "")).toLowerCase().includes(q)) return false;
+    return true;
+  }
+
+  function render() {
+    tbody.innerHTML = "";
+    rows.forEach((r, i) => {
+      if (!visible(r)) return;
+      const st = state[r.id];
+      const tr = document.createElement("tr");
+      tr.dataset.id = r.id;
+      if (r.suspicious) tr.classList.add("suspicious");
+      const refs = [...new Set((r.guess_ref || []).map((g) => `${g.docId}:${g.page}`))].join(", ");
+      tr.innerHTML =
+        `<td>${i + 1}<br><span style="opacity:.6">${esc(r.id)}</span></td>` +
+        `<td><span class="tag">${esc(r.aspect)}</span><span class="tag">${esc(r.manual)}</span>${r.suspicious ? '<span class="tag">weak-guess</span>' : ""}</td>` +
+        `<td class="q">${esc(r.question)}<br><button class="mini" data-copy-q>copy</button></td>` +
+        `<td class="guess"><span class="badge ${esc(r.guess_grounding || "none")}">${esc(r.guess_grounding || "?")}</span> ` +
+        `<span class="${r.guess_coverage < 0.45 ? "cov-low" : ""}">cov ${r.guess_coverage}</span> ${esc(refs)}<br>` +
+        `<strong>${esc(r.guess_direct || "")}</strong>` +
+        `<details><summary>full guess</summary>${esc(r.guess_answer || "(no answer captured)")}</details>` +
+        `<button class="mini" data-copy-g>copy guess</button></td>` +
+        `<td><textarea data-answer placeholder="your answer…">${esc(st.answer)}</textarea></td>` +
+        `<td><input class="ref" data-ref placeholder="manual + page/section" value="${esc(st.ref)}"></td>` +
+        `<td><select data-verdict>` +
+        ["", "agree", "disagree", "unclear", "unanswerable"].map((v) =>
+          `<option value="${v}"${st.verdict === v ? " selected" : ""}>${v || "—"}</option>`).join("") +
+        `</select></td>` +
+        `<td><button class="mini" data-fill title="fill from row above">⬇</button><br><button class="mini" data-copy-a>copy</button></td>`;
+      tbody.appendChild(tr);
+    });
+
+    tbody.querySelectorAll("tr[data-id]").forEach((tr) => {
+      const id = tr.dataset.id;
+      const r = rows.find((x) => x.id === id);
+      tr.querySelector("[data-answer]").addEventListener("input", (e) => { state[id].answer = e.target.value; persist(); });
+      tr.querySelector("[data-ref]").addEventListener("input", (e) => { state[id].ref = e.target.value; persist(); });
+      tr.querySelector("[data-verdict]").addEventListener("change", (e) => { state[id].verdict = e.target.value; persist(); });
+      tr.querySelector("[data-copy-q]").addEventListener("click", (e) => copyText(r.question, e.target));
+      tr.querySelector("[data-copy-g]").addEventListener("click", (e) => copyText(
+        `Q: ${r.question}\nGuess: ${r.guess_direct || ""}\n${r.guess_answer || ""}\nRefs: ${(r.guess_ref || []).map((g) => g.docId + ":" + g.page).join(", ")}`, e.target));
+      tr.querySelector("[data-copy-a]").addEventListener("click", (e) => copyText(state[id].answer || "", e.target));
+      tr.querySelector("[data-fill]").addEventListener("click", () => {
+        const prev = tr.previousElementSibling;
+        if (!prev || !prev.dataset.id) return;
+        const ps = state[prev.dataset.id];
+        state[id].answer = ps.answer || state[id].answer;
+        state[id].ref = ps.ref || state[id].ref;
+        tr.querySelector("[data-answer]").value = state[id].answer;
+        tr.querySelector("[data-ref]").value = state[id].ref;
+        persist();
+      });
+    });
+    updateProgress();
+  }
+
+  ["fAspect", "fManual", "fStatus", "fSearch"].forEach((fid) =>
+    document.getElementById(fid).addEventListener("input", render));
+  document.getElementById("export").addEventListener("click", () => {
+    const out = rows.map((r) => ({
+      id: r.id, aspect: r.aspect, manual: r.manual, question: r.question,
+      thread: r.thread || null,
+      model_guess: {
+        answer: r.guess_answer || null, direct: r.guess_direct || null,
+        grounding: r.guess_grounding || null, refs: r.guess_ref, coverage: r.guess_coverage,
+      },
+      sme_answer: (state[r.id].answer || "").trim() || null,
+      sme_ref: (state[r.id].ref || "").trim() || null,
+      sme_verdict: state[r.id].verdict || null,
+    }));
+    const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), rows: out }, null, 2)],
+      { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "battery-answers.json";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  });
+
+  render();
+})();
+</script>
+</body>
+</html>
